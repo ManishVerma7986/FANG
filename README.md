@@ -1,4 +1,14 @@
-# Fang
+# Project Definition
+
+| Attribute | Detail |
+| :--- | :--- |
+| **Product** | Custom Windows Android gaming player |
+| **Core language** | C++20 |
+| **Build system** | CMake |
+| **Primary target** | Maximum sustainable gaming FPS |
+| **Secondary targets** | GPU efficiency, frame pacing, stability |
+| **Development approach** | Modular, measurable, test-driven |
+
 
 **A custom Android gaming engine focused on maximum FPS, GPU utilization, and low-latency execution.**
 
@@ -354,17 +364,22 @@ This is a proposed structure, not a claim that all directories or components alr
 
 ## Building and Testing
 
-Build instructions will be added once the implementation language, build system, and target platform have been selected.
+The current Phase 0/1 build uses C++20, CMake, MSVC, and the Windows SDK. See [the Windows development setup](docs/development-setup.md) for prerequisites and [the host timing benchmark notes](docs/host-timing-benchmark.md) for measurement semantics.
 
-The initial build milestone should provide a reproducible workflow for:
+From a Visual Studio 2026 Build Tools installation with the C++ workload and Windows 11 SDK:
 
-1. Configuring the development environment.
-2. Building the engine from a clean checkout.
-3. Running automated tests.
-4. Launching the minimal executable.
-5. Inspecting logs and diagnosing failures.
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+./scripts/build.ps1 -Configuration Debug
+./scripts/test.ps1 -Configuration Debug
+./scripts/build.ps1 -Configuration Release
+./scripts/test.ps1 -Configuration Release
+./scripts/benchmark.ps1 -DurationMs 1000 -IntervalUs 1000 -Runs 3
+```
 
-Platform-specific instructions belong in `docs/development-setup.md`.
+The benchmark writes JSON with raw samples under `out/benchmarks/` by default. It measures Windows host timer wakeups only; it is not an Android, gaming FPS, GPU throughput, or input-to-photon benchmark.
+
+Phase 2 adds the platform-independent `fang_core` library for versioned configuration parsing, structured logging, typed errors, and ordered service lifecycle management. See [the Phase 2 core services notes](docs/phase2-core-services.md) for contracts and remaining limits.
 
 ---
 

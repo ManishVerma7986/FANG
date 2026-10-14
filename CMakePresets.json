@@ -1,0 +1,47 @@
+{
+  "version": 4,
+  "cmakeMinimumRequired": {
+    "major": 4,
+    "minor": 2,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "fang-windows",
+      "displayName": "Fang Windows x64",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/out/build"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "fang-debug",
+      "configurePreset": "fang-windows",
+      "configuration": "Debug"
+    },
+    {
+      "name": "fang-release",
+      "configurePreset": "fang-windows",
+      "configuration": "Release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "fang-debug",
+      "configurePreset": "fang-windows",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "fang-release",
+      "configurePreset": "fang-windows",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}
