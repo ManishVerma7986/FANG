@@ -224,59 +224,76 @@ Performance results should record the hardware, OS version, guest configuration,
 
 Fang will not promise a particular FPS target until a baseline and target hardware configuration have been established.
 
+The first-party [Android GLES probe](docs/android-gles-probe.md) provides a repeatable renderer microbenchmark for reference-path comparisons. It is not a game workload or a product FPS result.
+
+See [Performance Evidence and Phase 9 Gate](docs/performance-validation.md) for the separate host-timing, synthetic GLES, and real-workload measurement contracts and evidence-transfer rules.
+
 ---
 
 ## Development Roadmap
 
-### Phase 0 — Architecture and environment discovery
+### Phase 0 — Environment and foundation
 
-- [ ] Select and document the host operating system.
-- [ ] Identify the target CPU, GPU, driver stack, and available graphics APIs.
-- [ ] Identify and document the existing Android guest OS.
-- [ ] Evaluate feasible guest execution and graphics integration models.
-- [ ] Select the implementation language and build system.
-- [ ] Record architectural decisions and technical constraints.
+- [x] Inspect the Windows host, hardware, compiler, CMake, and SDK.
+- [x] Establish Debug and Release CMake builds and repeatable PowerShell scripts.
+- [ ] Verify reproduction from a clean checkout.
 
-### Phase 1 — Clean-room foundation
+### Phase 1 — Host timing benchmark
 
-- [ ] Create the initial source tree and build configuration.
-- [ ] Implement a minimal engine entry point and lifecycle.
-- [ ] Add configuration and structured logging.
-- [ ] Define guest integration and graphics backend interfaces.
-- [ ] Add unit tests and a basic automated build.
-- [ ] Document how to build and run the minimal engine.
+- [x] Implement monotonic QPC interval and wake-lateness measurements.
+- [x] Add validated arguments, raw JSON samples, metadata, and summary statistics.
+- [x] Test argument validation and statistics; run repeated host-only trials.
 
-### Phase 2 — Guest integration
+### Phase 2 — Core services
 
-- [ ] Implement the selected guest lifecycle integration.
-- [ ] Establish communication and health monitoring.
-- [ ] Validate guest startup, shutdown, and failure handling.
-- [ ] Verify application launch and input delivery.
-- [ ] Measure integration overhead.
+- [x] Add versioned configuration parsing, typed errors, and structured logging.
+- [x] Add service lifecycle ownership, rollback, shutdown error reporting, and capability states.
+- [x] Verify deterministic and concurrent lifecycle behavior in Debug and Release.
 
-### Phase 3 — Graphics and performance instrumentation
+### Phase 3 — Windows development shell
 
-- [ ] Validate the graphics integration path.
-- [ ] Implement frame timing and presentation measurements.
-- [ ] Collect available CPU, GPU, memory, and thermal telemetry.
-- [ ] Establish reproducible performance benchmarks.
-- [ ] Identify the dominant performance bottlenecks.
+- [x] Build a native Win32 shell connected to the real core service host and logger.
+- [x] Smoke-test Start/Stop state, visible logs, and clean shutdown.
+- [x] Add repeatable automated GUI interaction tests.
 
-### Phase 4 — Performance optimization
+### Phase 4 — Runtime and guest architecture decisions
 
-- [ ] Optimize frame pacing and synchronization.
-- [ ] Reduce unnecessary CPU overhead and memory copies.
-- [ ] Improve resource management and scheduling where supported.
-- [ ] Evaluate GPU workload efficiency and graphics backend alternatives.
-- [ ] Add regression tests and publish benchmark comparisons.
+- [x] Evaluate Android Emulator, QEMU+WHPX, and direct WHP options; see the proposed ADR.
+- [ ] Select and document an Android guest, execution model, graphics integration, security boundary, and licensing constraints.
+- [ ] Review and approve the architecture decision before substantial runtime implementation.
 
-### Phase 5 — Stability and compatibility
+### Phase 5 — Execution and memory
 
-- [ ] Test extended gaming sessions.
-- [ ] Validate recovery from guest and engine failures.
-- [ ] Test multiple supported configurations.
-- [ ] Document compatibility limitations.
-- [ ] Establish release and regression-testing procedures.
+- [ ] Implement only the minimum execution and memory functions required by the approved architecture.
+
+### Phase 6 — Guest boot and devices
+
+- [ ] Boot a real Android guest and verify required device paths.
+
+### Phase 7 — Graphics and display
+
+- [ ] Render the actual guest display and verify the host presentation path.
+
+### Phase 8 — Input and audio
+
+- [ ] Verify real guest input delivery and audio transport.
+
+### Phase 9 — Gaming compatibility and benchmarking
+
+**Status: BLOCKED.** The first-party animated GLES workload was implemented and locally exercised under separate authorization for graphics-path and instrumentation validation only. It is not a representative game workload, a product guest path, or Phase 9 evidence. See the [runtime readiness audit](docs/runtime-readiness-audit.md) and [performance evidence gate](docs/performance-validation.md).
+
+- [ ] Establish repeatable real-application workloads and record FPS/frame-time evidence.
+- [ ] Pass the evidence gate in [Performance Evidence and Phase 9 Gate](docs/performance-validation.md) before claiming product performance.
+
+### Phase 10 — Optimization
+
+**Status: NOT STARTED.** Do not optimize from host-timer or synthetic GLES results; require an approved Phase 9 baseline and evidence-backed bottleneck first.
+
+- [ ] Profile bottlenecks and retain only reproducible, correctness-preserving improvements.
+
+### Phase 11 — Production readiness
+
+- [ ] Audit security, licensing, packaging, compatibility, privacy, and release reproducibility.
 
 ---
 
@@ -381,6 +398,8 @@ The benchmark writes JSON with raw samples under `out/benchmarks/` by default. I
 
 Phase 2 adds the platform-independent `fang_core` library for versioned configuration parsing, structured logging, typed errors, and ordered service lifecycle management. See [the Phase 2 core services notes](docs/phase2-core-services.md) for contracts and remaining limits.
 
+The optional `fang-studio` Windows application exposes the core-service lifecycle and a local Android Player mode. It can launch and monitor an installed Android Emulator AVD in the Emulator's own standalone window; it does not embed the guest display, verify Android boot completion, or provide a Fang product guest/graphics backend. Android Studio is not launched by Fang for this path. See the [runtime readiness audit](docs/runtime-readiness-audit.md).
+
 ---
 
 ## Current Limitations
@@ -388,7 +407,7 @@ Phase 2 adds the platform-independent `fang_core` library for versioned configur
 Fang is in its early development phase. At this stage:
 
 - Gaming performance has not been benchmarked.
-- Android guest integration has not been validated.
+- Fang's product Android guest integration has not been selected or validated. Local reference-AVD launch support is not product-runtime evidence.
 - Graphics backend selection is pending feasibility testing.
 - Hardware compatibility has not been established.
 - No FPS, latency, or GPU utilization improvement is guaranteed.

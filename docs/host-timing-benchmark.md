@@ -32,3 +32,7 @@ Run multiple trials and retain the raw JSON. Comparisons should use the same hos
 ```
 
 The script writes results to `out/benchmarks/host-timing-<timestamp>.json` unless `-OutputFile` is provided. Invalid options return a nonzero process status and a diagnostic.
+
+## Evidence boundary
+
+This benchmark is Phase 1 host scheduling evidence only. It is not a guest timing or gaming-performance input and cannot demonstrate a guest bottleneck. See [Performance Evidence and Phase 9 Gate](performance-validation.md) for its exact evidence-transfer limits and the distinct Android GLES and real-workload contracts.
