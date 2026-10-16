@@ -358,15 +358,10 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM w_param, LPA
             if (app->close_when_stopped && app->runtime->status().state == fang::studio::RuntimeState::Failed &&
                 !app->close_failure_prompted) {
                 app->close_failure_prompted = true;
-                const auto answer = MessageBoxW(window,
-                    L"Fang could not confirm a graceful Emulator shutdown. Exit Fang and leave the Android Emulator process running?",
-                    L"Android Emulator still active", MB_YESNO | MB_ICONWARNING);
-                if (answer == IDYES) {
-                    DestroyWindow(window);
-                    return 0;
-                }
+                MessageBoxW(window,
+                    L"Fang could not confirm that the Emulator process group has exited. Fang will remain open and retain AVD ownership. Retry Stop after reviewing the runtime status.",
+                    L"Android Emulator shutdown unverified", MB_OK | MB_ICONWARNING);
                 app->close_when_stopped = false;
-                app->close_failure_prompted = false;
                 update_view(*app);
             }
             return 0;

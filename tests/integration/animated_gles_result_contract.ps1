@@ -163,6 +163,28 @@ try {
         throw 'Valid animated GLES result fixture was rejected.'
     }
 
+    $unsupportedSchema = $validResult | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+    $unsupportedSchema.schema_version = 2
+    Require-Rejection { Test-AnimatedGlesResultContract -Result $unsupportedSchema -EventsPath $eventPath } 'An unsupported schema version was accepted.'
+
+    $missingTerminalEvents = New-EventSet $runId
+    $missingTerminalEvents = @($missingTerminalEvents | Where-Object { $_.type -ne 'run_completed' })
+    $missingTerminalContent = Write-EventFile $missingTerminalEvents $eventPath
+    $missingTerminalResult = New-Result $runId $missingTerminalEvents $missingTerminalContent
+    Require-Rejection { Test-AnimatedGlesResultContract -Result $missingTerminalResult -EventsPath $eventPath } 'A completed run missing its terminal event was accepted.'
+
+    $backwardsTimestampEvents = New-EventSet $runId
+    $backwardsTimestampEvents[9].guest_monotonic_ns = $backwardsTimestampEvents[8].guest_monotonic_ns - 1
+    $backwardsTimestampContent = Write-EventFile $backwardsTimestampEvents $eventPath
+    $backwardsTimestampResult = New-Result $runId $backwardsTimestampEvents $backwardsTimestampContent
+    Require-Rejection { Test-AnimatedGlesResultContract -Result $backwardsTimestampResult -EventsPath $eventPath } 'A backwards guest-monotonic timestamp was accepted.'
+
+    $nonpositiveTimestampEvents = New-EventSet $runId
+    $nonpositiveTimestampEvents[0].guest_monotonic_ns = 0
+    $nonpositiveTimestampContent = Write-EventFile $nonpositiveTimestampEvents $eventPath
+    $nonpositiveTimestampResult = New-Result $runId $nonpositiveTimestampEvents $nonpositiveTimestampContent
+    Require-Rejection { Test-AnimatedGlesResultContract -Result $nonpositiveTimestampResult -EventsPath $eventPath } 'A nonpositive guest-monotonic timestamp was accepted.'
+
     $diagnosticEvents = New-EventSet $runId
     $diagnosticContent = Write-EventFile $diagnosticEvents $eventPath
     $diagnosticResult = New-Result $runId $diagnosticEvents $diagnosticContent -DiagnosticMode

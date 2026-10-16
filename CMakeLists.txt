@@ -47,11 +47,66 @@ target_include_directories(fang_runtime PUBLIC
 )
 target_link_libraries(fang_runtime PRIVATE fang_warnings User32)
 
+add_library(fang_runtime_broker_core STATIC
+    apps/fang-broker/broker_protocol.cpp
+    apps/fang-broker/broker_core.cpp
+    apps/fang-broker/broker_ownership.cpp
+)
+target_include_directories(fang_runtime_broker_core PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-broker"
+)
+target_link_libraries(fang_runtime_broker_core PRIVATE fang_warnings)
+
+add_library(fang_runtime_broker_transport STATIC
+    apps/fang-broker/broker_pipe.cpp
+)
+target_include_directories(fang_runtime_broker_transport PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-broker"
+)
+target_link_libraries(fang_runtime_broker_transport PUBLIC
+    fang_runtime_broker_core
+)
+target_link_libraries(fang_runtime_broker_transport PRIVATE
+    fang_warnings Advapi32
+)
+
+add_library(fang_runtime_broker_native STATIC
+    apps/fang-broker/broker_native_job.cpp
+    apps/fang-broker/broker_native_journal.cpp
+    apps/fang-broker/broker_supervisor.cpp
+)
+target_include_directories(fang_runtime_broker_native PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-broker"
+)
+target_link_libraries(fang_runtime_broker_native PUBLIC
+    fang_runtime_broker_core
+)
+target_link_libraries(fang_runtime_broker_native PRIVATE
+    fang_warnings Advapi32 Bcrypt
+)
+
 add_executable(fang-studio WIN32
     apps/fang-studio/main.cpp
 )
 target_link_libraries(fang-studio PRIVATE fang_core fang_runtime fang_warnings User32 Gdi32)
 target_compile_definitions(fang-studio PRIVATE UNICODE _UNICODE)
+
+add_executable(fang-runtime-broker
+    apps/fang-broker/main.cpp
+)
+target_link_libraries(fang-runtime-broker PRIVATE
+    fang_runtime_broker_transport fang_warnings
+)
+target_compile_definitions(fang-runtime-broker PRIVATE UNICODE _UNICODE)
+
+add_executable(fang-runtime-supervisor
+    apps/fang-broker/supervisor_main.cpp
+)
+target_link_libraries(fang-runtime-supervisor PRIVATE
+    fang_runtime_broker_native fang_runtime_broker_transport fang_warnings
+    Advapi32 Bcrypt
+)
+target_compile_definitions(fang-runtime-supervisor PRIVATE UNICODE _UNICODE)
 
 add_executable(fang-host-timing
     benchmarks/host-timing/main.cpp
@@ -77,6 +132,35 @@ if(BUILD_TESTING)
     target_link_libraries(fang-runtime-tests PRIVATE fang_runtime fang_warnings)
     add_test(NAME runtime-backend-unit COMMAND fang-runtime-tests)
 
+    add_executable(fang-runtime-broker-tests
+        tests/unit/broker_tests.cpp
+    )
+    target_link_libraries(fang-runtime-broker-tests PRIVATE
+        fang_runtime_broker_transport fang_warnings
+    )
+    target_compile_definitions(fang-runtime-broker-tests PRIVATE UNICODE _UNICODE)
+    add_test(NAME runtime-broker-unit COMMAND fang-runtime-broker-tests)
+
+    add_executable(fang-runtime-broker-native-tests
+        tests/integration/broker_native_ownership_tests.cpp
+    )
+    target_link_libraries(fang-runtime-broker-native-tests PRIVATE
+        fang_runtime_broker_native fang_runtime_broker_transport fang_warnings
+        Advapi32 Bcrypt
+    )
+    target_compile_definitions(fang-runtime-broker-native-tests PRIVATE UNICODE _UNICODE)
+    add_test(NAME runtime-broker-native-unit COMMAND fang-runtime-broker-native-tests)
+
+    add_executable(fang-runtime-supervisor-native-tests
+        tests/integration/broker_supervisor_tests.cpp
+    )
+    target_link_libraries(fang-runtime-supervisor-native-tests PRIVATE
+        fang_runtime_broker_native fang_runtime_broker_transport fang_warnings
+        Advapi32 Bcrypt
+    )
+    target_compile_definitions(fang-runtime-supervisor-native-tests PRIVATE UNICODE _UNICODE)
+    add_test(NAME runtime-supervisor-native-unit COMMAND fang-runtime-supervisor-native-tests)
+
     add_test(NAME host-timing-rejects-zero-duration
         COMMAND fang-host-timing --duration-ms 0
     )
@@ -85,12 +169,24 @@ if(BUILD_TESTING)
     add_executable(fang-studio-smoke-tests
         tests/integration/studio_smoke_tests.cpp
     )
+    target_include_directories(fang-studio-smoke-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-studio"
+    )
     add_dependencies(fang-studio-smoke-tests fang-studio)
     target_link_libraries(fang-studio-smoke-tests PRIVATE fang_warnings User32)
     add_test(NAME studio-gui-smoke
         COMMAND fang-studio-smoke-tests "$<TARGET_FILE:fang-studio>"
     )
     set_tests_properties(studio-gui-smoke PROPERTIES TIMEOUT 20)
+
+    add_executable(fang-studio-window-selection-tests
+        tests/integration/studio_window_selection_tests.cpp
+    )
+    target_include_directories(fang-studio-window-selection-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-studio"
+    )
+    target_link_libraries(fang-studio-window-selection-tests PRIVATE fang_warnings)
+    add_test(NAME studio-window-selection-unit COMMAND fang-studio-window-selection-tests)
 
     find_program(FANG_POWERSHELL_EXECUTABLE NAMES powershell.exe pwsh.exe)
     if(FANG_POWERSHELL_EXECUTABLE)

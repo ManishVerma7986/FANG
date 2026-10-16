@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -30,9 +31,14 @@ struct RuntimeResult {
 };
 
 struct RuntimeObservation {
+    // process_running covers every process retained by the runtime ownership boundary.
     bool process_running{};
     bool player_window_available{};
     std::string error;
+    bool root_process_running{};
+    std::uint32_t active_process_count{};
+    std::uint32_t root_process_id{};
+    std::vector<std::uint32_t> owned_process_ids;
 };
 
 struct EmulatorConfig {

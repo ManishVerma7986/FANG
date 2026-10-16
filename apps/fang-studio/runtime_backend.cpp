@@ -3,13 +3,16 @@
 #include <Windows.h>
 #include <TlHelp32.h>
 #include "runtime_backend.hpp"
+#include "suspended_process_launch.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cwctype>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace fang::studio {
 namespace {
@@ -193,50 +196,136 @@ bool read_process_output(const std::filesystem::path& executable, const std::vec
 }
 
 struct WindowSearch {
+    HANDLE job{};
     const std::vector<DWORD>* process_ids{};
     HWND window{};
+    std::string error;
 };
+
+bool is_live_job_member(DWORD process_id, HANDLE job, std::string& error) {
+    const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+        FALSE, process_id);
+    if (process == nullptr) {
+        const DWORD open_error = GetLastError();
+        if (open_error != ERROR_INVALID_PARAMETER) {
+            error = "Could not open Job Object member PID " + std::to_string(process_id) +
+                " for window verification: " + narrow(windows_error_message(open_error));
+        }
+        return false;
+    }
+    BOOL belongs_to_job{};
+    const BOOL query_succeeded = IsProcessInJob(process, job, &belongs_to_job);
+    const DWORD query_error = query_succeeded == 0 ? GetLastError() : ERROR_SUCCESS;
+    const DWORD wait_result = WaitForSingleObject(process, 0);
+    const DWORD wait_error = wait_result == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS;
+    const BOOL handle_closed = CloseHandle(process);
+    const DWORD close_error = handle_closed == 0 ? GetLastError() : ERROR_SUCCESS;
+    if (query_succeeded == 0) {
+        error = "Could not verify Job Object membership for PID " + std::to_string(process_id) +
+            ": " + narrow(windows_error_message(query_error));
+        return false;
+    }
+    if (wait_result == WAIT_FAILED) {
+        error = "Could not inspect Job Object member PID " + std::to_string(process_id) +
+            ": " + narrow(windows_error_message(wait_error));
+        return false;
+    }
+    if (handle_closed == 0) {
+        error = "Could not close the temporary process handle for Job Object member PID " +
+            std::to_string(process_id) + ": " + narrow(windows_error_message(close_error));
+        return false;
+    }
+    return belongs_to_job != FALSE && wait_result == WAIT_TIMEOUT;
+}
+
+DWORD process_id_for_window(HWND window) {
+    DWORD process_id{};
+    if (window == nullptr || !IsWindow(window)) {
+        return 0;
+    }
+    GetWindowThreadProcessId(window, &process_id);
+    return process_id;
+}
 
 BOOL CALLBACK find_process_window(HWND window, LPARAM parameter) {
     auto* search = reinterpret_cast<WindowSearch*>(parameter);
     DWORD process_id{};
     GetWindowThreadProcessId(window, &process_id);
     if (std::find(search->process_ids->begin(), search->process_ids->end(), process_id) != search->process_ids->end() &&
-        GetWindow(window, GW_OWNER) == nullptr && IsWindowVisible(window)) {
-        search->window = window;
-        return FALSE;
+        GetWindow(window, GW_OWNER) == nullptr && IsWindowVisible(window) &&
+        is_live_job_member(process_id, search->job, search->error)) {
+        std::string verification_error;
+        if (process_id_for_window(window) == process_id &&
+            is_live_job_member(process_id, search->job, verification_error)) {
+            search->window = window;
+            return FALSE;
+        }
+        if (!verification_error.empty()) search->error = std::move(verification_error);
     }
     return TRUE;
 }
 
-HWND process_window(DWORD process_id) {
-    std::vector<DWORD> process_ids{process_id};
-    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snapshot != INVALID_HANDLE_VALUE) {
-        PROCESSENTRY32W entry{};
-        entry.dwSize = sizeof(entry);
-        if (Process32FirstW(snapshot, &entry) != 0) {
-            std::vector<PROCESSENTRY32W> processes;
-            do {
-                processes.push_back(entry);
-            } while (Process32NextW(snapshot, &entry) != 0);
-            bool found_child = true;
-            while (found_child) {
-                found_child = false;
-                for (const auto& process : processes) {
-                    if (std::find(process_ids.begin(), process_ids.end(), process.th32ParentProcessID) != process_ids.end() &&
-                        std::find(process_ids.begin(), process_ids.end(), process.th32ProcessID) == process_ids.end()) {
-                        process_ids.push_back(process.th32ProcessID);
-                        found_child = true;
-                    }
-                }
+bool job_process_ids(HANDLE job, std::vector<DWORD>& process_ids, std::string& error) {
+    std::size_t capacity = 16;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        const auto header_size = offsetof(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList);
+        std::vector<std::byte> buffer(header_size + capacity * sizeof(ULONG_PTR));
+        auto* list = reinterpret_cast<JOBOBJECT_BASIC_PROCESS_ID_LIST*>(buffer.data());
+        DWORD returned{};
+        if (QueryInformationJobObject(job, JobObjectBasicProcessIdList, list,
+                static_cast<DWORD>(buffer.size()), &returned) != 0) {
+            process_ids.clear();
+            process_ids.reserve(list->NumberOfProcessIdsInList);
+            for (DWORD index = 0; index < list->NumberOfProcessIdsInList; ++index) {
+                process_ids.push_back(static_cast<DWORD>(list->ProcessIdList[index]));
             }
+            return true;
         }
-        CloseHandle(snapshot);
+        const DWORD query_error = GetLastError();
+        if (query_error != ERROR_MORE_DATA) {
+            error = "Could not enumerate the owned Android Emulator process group: " +
+                narrow(windows_error_message(query_error));
+            return false;
+        }
+        capacity = std::max(capacity * 2,
+            static_cast<std::size_t>(list->NumberOfAssignedProcesses));
     }
-    WindowSearch search{&process_ids};
+    error = "The Android Emulator process group changed too quickly to enumerate safely.";
+    return false;
+}
+
+bool job_active_process_count(HANDLE job, DWORD& active_processes, std::string& error) {
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting{};
+    if (QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &accounting,
+            sizeof(accounting), nullptr) == 0) {
+        error = "Could not verify Android Emulator process-group shutdown: " +
+            narrow(windows_error_message(GetLastError()));
+        return false;
+    }
+    active_processes = accounting.ActiveProcesses;
+    return true;
+}
+
+HWND process_window(HANDLE job, const std::vector<DWORD>& process_ids, std::string& error) {
+    WindowSearch search{job, &process_ids};
     EnumWindows(find_process_window, reinterpret_cast<LPARAM>(&search));
+    error = std::move(search.error);
     return search.window;
+}
+
+std::vector<std::uint32_t> process_id_values(const std::vector<DWORD>& process_ids) {
+    return {process_ids.begin(), process_ids.end()};
+}
+
+std::string process_id_list(const std::vector<std::uint32_t>& process_ids) {
+    std::ostringstream text;
+    text << '[';
+    for (std::size_t index = 0; index < process_ids.size(); ++index) {
+        if (index != 0) text << ',';
+        text << process_ids[index];
+    }
+    text << ']';
+    return text.str();
 }
 
 std::wstring mutex_name(std::wstring_view avd_name) {
@@ -251,14 +340,22 @@ std::wstring mutex_name(std::wstring_view avd_name) {
 class WindowsEmulatorProcess final : public IEmulatorProcess {
 public:
     ~WindowsEmulatorProcess() override {
-        release_handles();
+        const auto observation = observe();
+        if (observation.process_running || !observation.error.empty()) {
+            return;
+        }
+        std::string cleanup_error;
+        static_cast<void>(release_handles(cleanup_error));
     }
 
     RuntimeResult launch(const EmulatorConfig& config) override {
-        if (process_running()) {
+        const auto current = observe();
+        if (!current.error.empty()) {
+            return RuntimeResult::failure(current.error);
+        }
+        if (current.process_running) {
             return RuntimeResult::failure("An Android Emulator process owned by this Fang instance is already active.");
         }
-        release_handles();
         if (config.executable.empty() || config.avd_name.empty()) {
             return RuntimeResult::failure("Select an installed AVD and verify the Android Emulator executable before starting.");
         }
@@ -275,44 +372,198 @@ public:
             return RuntimeResult::failure("Fang could not reserve this AVD: " + narrow(windows_error_message(mutex_error)));
         }
         if (mutex_error == ERROR_ALREADY_EXISTS) {
-            CloseHandle(mutex_);
-            mutex_ = nullptr;
+            std::string close_error;
+            if (!close_handle(mutex_, "existing AVD mutex handle", close_error)) {
+                return RuntimeResult::failure("This AVD is already managed by another Fang instance; " + close_error);
+            }
             return RuntimeResult::failure("This AVD is already being managed by another Fang instance.");
         }
+        mutex_owned_ = true;
 
         const auto arguments = build_emulator_arguments(config.avd_name);
-        auto command_line = quote_command_line(config.executable.wstring(), arguments);
+        const auto command_line = quote_command_line(config.executable.wstring(), arguments);
         STARTUPINFOW startup{};
         startup.cb = sizeof(startup);
         startup.dwFlags = STARTF_USESHOWWINDOW;
         startup.wShowWindow = SW_SHOWNORMAL;
-        PROCESS_INFORMATION process{};
-        if (CreateProcessW(config.executable.c_str(), command_line.data(), nullptr, nullptr, FALSE, 0,
-                nullptr, config.executable.parent_path().c_str(), &startup, &process) == 0) {
-            const auto message = "Could not launch Android Emulator: " + narrow(windows_error_message(GetLastError()));
-            ReleaseMutex(mutex_);
-            CloseHandle(mutex_);
-            mutex_ = nullptr;
-            return RuntimeResult::failure(message);
+        PROCESS_INFORMATION created_process{};
+        launch_error_.clear();
+        const auto launch_result = launch_suspended_process(
+            [&] {
+                job_ = CreateJobObjectW(nullptr, nullptr);
+                if (job_ == nullptr) {
+                    launch_error_ = "Could not create the non-killing Android Emulator Job Object: " +
+                        narrow(windows_error_message(GetLastError()));
+                    return false;
+                }
+                return true;
+            },
+            [&] {
+                auto mutable_command_line = command_line;
+                if (CreateProcessW(config.executable.c_str(), mutable_command_line.data(), nullptr, nullptr,
+                        FALSE, CREATE_SUSPENDED, nullptr, config.executable.parent_path().c_str(),
+                        &startup, &created_process) == 0) {
+                    launch_error_ = "Could not create a suspended Android Emulator process: " +
+                        narrow(windows_error_message(GetLastError()));
+                    return false;
+                }
+                process_ = created_process.hProcess;
+                thread_ = created_process.hThread;
+                process_id_ = created_process.dwProcessId;
+                return true;
+            },
+            [&] {
+                if (AssignProcessToJobObject(job_, process_) == 0) {
+                    launch_error_ = "Could not assign the suspended Emulator to its Job Object: " +
+                        narrow(windows_error_message(GetLastError()));
+                    return false;
+                }
+                return true;
+            },
+            [&] {
+                const DWORD previous_suspend_count = ResumeThread(thread_);
+                if (previous_suspend_count == static_cast<DWORD>(-1)) {
+                    launch_error_ = "Could not resume the Android Emulator after Job Object assignment: " +
+                        narrow(windows_error_message(GetLastError()));
+                    return false;
+                }
+                if (previous_suspend_count != 1) {
+                    launch_error_ = "The Android Emulator primary thread had an unexpected suspend count.";
+                    return false;
+                }
+                return true;
+            },
+            [&] {
+                if (process_ == nullptr) {
+                    return true;
+                }
+                if (WaitForSingleObject(process_, 0) != WAIT_OBJECT_0 &&
+                    TerminateProcess(process_, ERROR_PROCESS_ABORTED) == 0 &&
+                    GetLastError() != ERROR_ACCESS_DENIED) {
+                    launch_error_ += " The exact Fang-created root could not be aborted.";
+                    return false;
+                }
+                if (WaitForSingleObject(process_, 5000) != WAIT_OBJECT_0) {
+                    launch_error_ += " The exact Fang-created root did not exit within 5 seconds.";
+                    return false;
+                }
+                DWORD active_processes{};
+                std::string query_error;
+                if (job_ != nullptr && !job_active_process_count(job_, active_processes, query_error)) {
+                    launch_error_ += " " + query_error;
+                    return false;
+                }
+                if (active_processes != 0) {
+                    launch_error_ += " The root exited but owned Job Object processes remain active.";
+                    return false;
+                }
+                return true;
+            });
+        std::string thread_close_error;
+        const bool thread_closed = close_handle(thread_, "Emulator primary thread handle", thread_close_error);
+        if (launch_result == SuspendedLaunchResult::Started && !thread_closed) {
+            startup_cleanup_unverified_ = true;
+            launch_error_ = thread_close_error;
+            return RuntimeResult::failure("Emulator is in the owned Job Object, but " + thread_close_error +
+                " Fang retains runtime handles and AVD ownership.");
         }
-        process_ = process.hProcess;
-        process_id_ = process.dwProcessId;
-        CloseHandle(process.hThread);
+        if (launch_result != SuspendedLaunchResult::Started) {
+            if (launch_error_.empty()) {
+                launch_error_ = "Android Emulator launch setup failed at stage " +
+                    std::to_string(static_cast<int>(launch_result)) + ".";
+            }
+            if (launch_result == SuspendedLaunchResult::AssignmentCleanupUnverified ||
+                launch_result == SuspendedLaunchResult::ResumeCleanupUnverified) {
+                startup_cleanup_unverified_ = true;
+                suspended_unassigned_ =
+                    launch_result == SuspendedLaunchResult::AssignmentCleanupUnverified;
+                return RuntimeResult::failure(launch_error_ +
+                    " Fang retains the process/job handles and AVD ownership; shutdown is unverified.");
+            }
+            std::string cleanup_error;
+            if (!release_handles(cleanup_error)) {
+                startup_cleanup_unverified_ = true;
+                return RuntimeResult::failure(launch_error_ + " Resource cleanup is unverified: " + cleanup_error +
+                    " Fang retains remaining handles and AVD ownership.");
+            }
+            return RuntimeResult::failure(launch_error_);
+        }
         started_at_ = GetTickCount64();
         stop_requested_at_ = 0;
         stop_requested_ = false;
         startup_timeout_reported_ = false;
-        return RuntimeResult::success("Android Emulator process started; waiting for its standalone window.");
+        BOOL root_is_in_job{};
+        if (IsProcessInJob(process_, job_, &root_is_in_job) == 0) {
+            launch_error_ = "Could not verify that the resumed Emulator root belongs to Fang's Job Object: " +
+                narrow(windows_error_message(GetLastError()));
+            startup_cleanup_unverified_ = true;
+            return RuntimeResult::failure(launch_error_ + " Fang retains the process/job handles and AVD ownership.");
+        }
+        if (root_is_in_job == FALSE) {
+            launch_error_ = "Windows reported that the resumed Emulator root is not a member of Fang's Job Object.";
+            startup_cleanup_unverified_ = true;
+            return RuntimeResult::failure(launch_error_ + " Fang retains the process/job handles and AVD ownership.");
+        }
+        std::vector<DWORD> process_ids;
+        std::string query_error;
+        if (!job_process_ids(job_, process_ids, query_error)) {
+            startup_cleanup_unverified_ = true;
+            launch_error_ = query_error;
+            return RuntimeResult::failure(query_error + " Fang retains the process/job handles and AVD ownership.");
+        }
+        return RuntimeResult::success("Android Emulator root PID=" + std::to_string(process_id_) +
+            " started in Fang's non-killing Job Object; owned PIDs=" +
+            process_id_list(process_id_values(process_ids)) + ". Waiting for its standalone window.");
     }
 
     RuntimeResult request_stop() override {
-        if (!process_running()) {
+        if (suspended_unassigned_) {
+            if (WaitForSingleObject(process_, 0) != WAIT_OBJECT_0 &&
+                TerminateProcess(process_, ERROR_PROCESS_ABORTED) == 0 &&
+                GetLastError() != ERROR_ACCESS_DENIED) {
+                return RuntimeResult::failure("Could not retry cleanup of Fang's exact suspended, unassigned Emulator root.");
+            }
+            if (WaitForSingleObject(process_, 5000) != WAIT_OBJECT_0) {
+                return RuntimeResult::failure("Shutdown remains unverified: Fang's suspended, unassigned Emulator root did not exit within 5 seconds.");
+            }
+            std::string cleanup_error;
+            if (!release_handles(cleanup_error)) {
+                return RuntimeResult::failure("The suspended, unassigned Emulator root exited, but resource cleanup is unverified: " + cleanup_error);
+            }
+            return RuntimeResult::success("The suspended, unassigned Emulator root exited; no Job Object member was left active.");
+        }
+        const auto observation = observe();
+        if (!observation.error.empty()) {
+            return RuntimeResult::failure(observation.error);
+        }
+        if (!observation.process_running) {
             return RuntimeResult::success("Android Emulator process is already stopped.");
         }
         stop_requested_ = true;
         stop_requested_at_ = GetTickCount64();
         stop_message_sent_ = false;
-        const auto window = process_window(process_id_);
+        std::vector<DWORD> process_ids;
+        std::string enumeration_error;
+        if (!job_process_ids(job_, process_ids, enumeration_error)) {
+            stop_requested_ = false;
+            return RuntimeResult::failure(enumeration_error);
+        }
+        std::string window_error;
+        const auto window = process_window(job_, process_ids, window_error);
+        if (!window_error.empty()) {
+            stop_requested_ = false;
+            return RuntimeResult::failure(window_error);
+        }
+        const DWORD window_process_id = process_id_for_window(window);
+        std::string member_error;
+        if (window != nullptr && !is_live_job_member(window_process_id, job_, member_error)) {
+            stop_message_sent_ = false;
+            if (!member_error.empty()) {
+                stop_requested_ = false;
+                return RuntimeResult::failure(member_error);
+            }
+            return RuntimeResult::success("Stop requested; the selected Job Object window exited or changed ownership before close.");
+        }
         if (window != nullptr && PostMessageW(window, WM_CLOSE, 0, 0) == 0) {
             stop_requested_ = false;
             return RuntimeResult::failure("Could not send a graceful close request to the Android Emulator window.");
@@ -324,12 +575,31 @@ public:
     }
 
     RuntimeResult open_player() override {
-        if (!process_running()) {
+        const auto observation = observe();
+        if (!observation.error.empty()) {
+            return RuntimeResult::failure(observation.error);
+        }
+        if (!observation.process_running) {
             return RuntimeResult::failure("The Android Emulator process is not running.");
         }
-        const auto window = process_window(process_id_);
+        std::vector<DWORD> process_ids;
+        std::string enumeration_error;
+        if (!job_process_ids(job_, process_ids, enumeration_error)) {
+            return RuntimeResult::failure(enumeration_error);
+        }
+        std::string window_error;
+        const auto window = process_window(job_, process_ids, window_error);
+        if (!window_error.empty()) {
+            return RuntimeResult::failure(window_error);
+        }
         if (window == nullptr) {
             return RuntimeResult::failure("The standalone Emulator window is not available yet; guest boot is not verified.");
+        }
+        const DWORD window_process_id = process_id_for_window(window);
+        std::string member_error;
+        if (!is_live_job_member(window_process_id, job_, member_error)) {
+            if (!member_error.empty()) return RuntimeResult::failure(member_error);
+            return RuntimeResult::failure("The standalone Emulator window could not be revalidated as a live Job Object member.");
         }
         ShowWindow(window, SW_RESTORE);
         if (SetForegroundWindow(window) == 0) {
@@ -339,64 +609,174 @@ public:
     }
 
     RuntimeObservation observe() override {
-        if (!process_running()) {
-            if (process_ != nullptr) {
-                DWORD exit_code{};
-                const bool exited_unexpectedly = !stop_requested_ &&
-                    GetExitCodeProcess(process_, &exit_code) != 0;
-                release_handles();
-                if (exited_unexpectedly) {
-                    return {false, false, "Android Emulator exited unexpectedly with code " +
-                        std::to_string(exit_code) + "."};
-                }
+        if (suspended_unassigned_) {
+            const DWORD wait = WaitForSingleObject(process_, 0);
+            if (wait == WAIT_FAILED) {
+                return {true, false, "Could not inspect Fang's suspended, unassigned Emulator root: " +
+                    narrow(windows_error_message(GetLastError())), true, 0};
             }
-            return {};
+            if (wait == WAIT_OBJECT_0) {
+                const DWORD previous_pid = process_id_;
+                std::string cleanup_error;
+                if (!release_handles(cleanup_error)) {
+                    RuntimeObservation failed{false, false,
+                        "Suspended Emulator root exited, but resource cleanup is unverified: " + cleanup_error,
+                        false, 0};
+                    failed.root_process_id = previous_pid;
+                    return failed;
+                }
+                RuntimeObservation stopped;
+                stopped.root_process_id = previous_pid;
+                return stopped;
+            }
+            RuntimeObservation active{true, false, {}, true, 0};
+            active.root_process_id = process_id_;
+            active.owned_process_ids.push_back(process_id_);
+            return active;
+        }
+        const DWORD root_wait = process_ == nullptr ? WAIT_OBJECT_0 : WaitForSingleObject(process_, 0);
+        if (root_wait == WAIT_FAILED) {
+            RuntimeObservation failed{true, false, "Could not inspect the Android Emulator root process: " +
+                narrow(windows_error_message(GetLastError())), true, 0};
+            failed.root_process_id = process_id_;
+            return failed;
+        }
+        const bool root_running = root_wait == WAIT_TIMEOUT;
+        DWORD active_processes{};
+        std::string query_error;
+        if (job_ != nullptr && !job_active_process_count(job_, active_processes, query_error)) {
+            RuntimeObservation failed{true, false, query_error, root_running, 0};
+            failed.root_process_id = process_id_;
+            return failed;
+        }
+        if (root_running && job_ != nullptr && active_processes == 0) {
+            RuntimeObservation failed{true, false,
+                "The Emulator root is active but the Job Object reports no active members; shutdown ownership is inconsistent.", true, 0};
+            failed.root_process_id = process_id_;
+            return failed;
+        }
+        const bool group_running = root_running || active_processes > 0;
+        if (!group_running) {
+            const DWORD previous_pid = process_id_;
+            DWORD exit_code{};
+            const bool exited_unexpectedly = process_ != nullptr && !stop_requested_ &&
+                GetExitCodeProcess(process_, &exit_code) != 0;
+            std::string cleanup_error;
+            if (!release_handles(cleanup_error)) {
+                RuntimeObservation failed{false, false,
+                    "Owned Job Object is empty, but resource/AVD-mutex cleanup is unverified: " + cleanup_error,
+                    false, 0};
+                failed.root_process_id = previous_pid;
+                return failed;
+            }
+            if (exited_unexpectedly) {
+                RuntimeObservation failed{false, false, "Android Emulator root PID " +
+                    std::to_string(previous_pid) + " exited unexpectedly with code " +
+                    std::to_string(exit_code) + "; the owned Job Object is empty.", false, 0};
+                failed.root_process_id = previous_pid;
+                return failed;
+            }
+            RuntimeObservation stopped;
+            stopped.root_process_id = previous_pid;
+            return stopped;
         }
         const auto now = GetTickCount64();
-        const auto window = process_window(process_id_);
+        std::vector<DWORD> process_ids;
+        std::string enumeration_error;
+        if (!job_process_ids(job_, process_ids, enumeration_error)) {
+            RuntimeObservation failed{true, false, enumeration_error, root_running, active_processes};
+            failed.root_process_id = process_id_;
+            return failed;
+        }
+        std::string window_error;
+        const auto window = process_window(job_, process_ids, window_error);
+        if (!window_error.empty()) {
+            RuntimeObservation failed{true, false, window_error, root_running, active_processes};
+            failed.root_process_id = process_id_;
+            failed.owned_process_ids = process_id_values(process_ids);
+            return failed;
+        }
         if (stop_requested_ && window != nullptr && !stop_message_sent_ && now - stop_requested_at_ < stop_timeout_ms) {
             stop_message_sent_ = PostMessageW(window, WM_CLOSE, 0, 0) != 0;
         }
-        if (!stop_requested_ && window == nullptr && now - started_at_ >= startup_timeout_ms &&
+        if (!stop_requested_ && root_running && window == nullptr && now - started_at_ >= startup_timeout_ms &&
             !startup_timeout_reported_) {
             startup_timeout_reported_ = true;
-            return {true, false, "Emulator process is still active but its window did not appear within 90 seconds. It was left running; Stop or close it manually."};
+            RuntimeObservation timeout{true, false,
+                "Emulator root is active but no owned Job Object window appeared within 90 seconds. It was left running; Stop or close it manually.",
+                root_running, active_processes};
+            timeout.root_process_id = process_id_;
+            timeout.owned_process_ids = process_id_values(process_ids);
+            return timeout;
         }
         if (stop_requested_ && now - stop_requested_at_ >= stop_timeout_ms) {
             stop_requested_ = false;
             stop_message_sent_ = false;
-            return {true, window != nullptr, "Emulator did not exit after a graceful close request. It was left running; close its window manually."};
+            return {true, window != nullptr,
+                "Shutdown unverified after 30 seconds: root PID=" + std::to_string(process_id_) +
+                (root_running ? " active" : " exited") + ", owned Job Object process count=" +
+                std::to_string(active_processes) + ", PIDs=" + process_id_list(process_id_values(process_ids)) +
+                ". Fang left the group running; retry Stop or close its owned window.",
+                root_running, active_processes, process_id_, process_id_values(process_ids)};
         }
-        return {true, window != nullptr, {}};
+        return {true, window != nullptr, {}, root_running, active_processes,
+            process_id_, process_id_values(process_ids)};
     }
 
 private:
-    void release_handles() {
-        if (process_ != nullptr) {
-            CloseHandle(process_);
-            process_ = nullptr;
+    bool close_handle(HANDLE& handle, const char* name, std::string& error) {
+        if (handle == nullptr) {
+            return true;
+        }
+        if (CloseHandle(handle) == 0) {
+            error = "Could not close the " + std::string(name) + ": " +
+                narrow(windows_error_message(GetLastError()));
+            return false;
+        }
+        handle = nullptr;
+        return true;
+    }
+
+    bool release_handles(std::string& error) {
+        if (!close_handle(thread_, "Emulator primary thread handle", error) ||
+            !close_handle(process_, "Emulator root process handle", error) ||
+            !close_handle(job_, "Emulator Job Object handle", error)) {
+            return false;
         }
         if (mutex_ != nullptr) {
-            ReleaseMutex(mutex_);
-            CloseHandle(mutex_);
-            mutex_ = nullptr;
+            if (mutex_owned_) {
+                if (ReleaseMutex(mutex_) == 0) {
+                    error = "Could not release the AVD ownership mutex: " +
+                        narrow(windows_error_message(GetLastError()));
+                    return false;
+                }
+                mutex_owned_ = false;
+            }
+            if (!close_handle(mutex_, "AVD ownership mutex handle", error)) {
+                return false;
+            }
         }
         process_id_ = 0;
         stop_message_sent_ = false;
+        startup_cleanup_unverified_ = false;
+        suspended_unassigned_ = false;
+        return true;
     }
 
-    bool process_running() const {
-        return process_ != nullptr && WaitForSingleObject(process_, 0) == WAIT_TIMEOUT;
-    }
-
+    HANDLE job_{};
     HANDLE process_{};
+    HANDLE thread_{};
     HANDLE mutex_{};
     DWORD process_id_{};
+    bool mutex_owned_{};
     ULONGLONG started_at_{};
     ULONGLONG stop_requested_at_{};
     bool stop_requested_{};
     bool stop_message_sent_{};
     bool startup_timeout_reported_{};
+    bool startup_cleanup_unverified_{};
+    bool suspended_unassigned_{};
+    std::string launch_error_;
 };
 
 }
@@ -501,9 +881,31 @@ void RuntimeBackend::poll() {
         restart_pending_ = false;
         return;
     }
-    if (!observation.process_running) {
+    if (observation.process_running) {
+        if ((status_.state == RuntimeState::Starting || status_.state == RuntimeState::Running) &&
+            !observation.root_process_running) {
+            status_ = {RuntimeState::Failed,
+                "Android Emulator root PID " + std::to_string(observation.root_process_id) +
+                " exited while " + std::to_string(observation.active_process_count) +
+                " owned process(es) remain in Job Object; PIDs=" + process_id_list(observation.owned_process_ids) + "."};
+            restart_pending_ = false;
+        } else if (status_.state == RuntimeState::Starting && observation.player_window_available) {
+            status_ = {RuntimeState::Running, "Standalone Emulator window is available for root PID " +
+                std::to_string(observation.root_process_id) + "; owned Job Object PIDs=" +
+                process_id_list(observation.owned_process_ids) + "; guest boot status is not verified."};
+        } else if (status_.state == RuntimeState::Stopping) {
+            status_.message = "Waiting for root PID " + std::to_string(observation.root_process_id) +
+                (observation.root_process_running ? " to exit" : " (exited)") + "; owned Job Object count=" +
+                std::to_string(observation.active_process_count) + ", PIDs=" +
+                process_id_list(observation.owned_process_ids) + "; no process is terminated forcibly.";
+        }
+        return;
+    }
+    {
         if (status_.state == RuntimeState::Stopping || status_.state == RuntimeState::Starting) {
-            status_ = {RuntimeState::Stopped, "Stopped"};
+            status_ = {RuntimeState::Stopped, "Stopped; root PID " +
+                std::to_string(observation.root_process_id) +
+                " exited and owned Job Object process count is 0."};
             if (restart_pending_) {
                 const auto config = restart_config_;
                 restart_pending_ = false;
@@ -512,12 +914,6 @@ void RuntimeBackend::poll() {
         } else if (status_.state == RuntimeState::Running) {
             status_ = {RuntimeState::Failed, "Android Emulator exited unexpectedly."};
         }
-        return;
-    }
-    if (status_.state == RuntimeState::Starting && observation.player_window_available) {
-        status_ = {RuntimeState::Running, "Standalone Emulator window is available; guest boot status is not verified."};
-    } else if (status_.state == RuntimeState::Stopping) {
-        status_.message = "Stopping Android Emulator; the guest process is not terminated forcibly.";
     }
 }
 
