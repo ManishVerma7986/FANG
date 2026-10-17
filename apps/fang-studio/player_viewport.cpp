@@ -50,8 +50,11 @@ bool PlayerViewport::register_class(HINSTANCE instance) {
 
 PlayerViewport::PlayerViewport(HWND parent, HINSTANCE instance, int control_id,
     std::shared_ptr<StudioInputRouter> router,
-    std::shared_ptr<StudioVideoConsumer> video_consumer)
-    : parent_(parent), router_(std::move(router)), video_consumer_(std::move(video_consumer)) {
+    std::shared_ptr<StudioVideoConsumer> video_consumer,
+    std::unique_ptr<IViewportRenderer> renderer)
+    : parent_(parent), router_(std::move(router)),
+      video_consumer_(std::move(video_consumer)),
+      renderer_(std::move(renderer)) {
     register_class(instance);
 
     font_title_ = CreateFontW(-14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
@@ -74,9 +77,19 @@ PlayerViewport::PlayerViewport(HWND parent, HINSTANCE instance, int control_id,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(control_id)),
         instance,
         this);
+
+    if (!renderer_) {
+        renderer_ = std::make_unique<ViewportD3D11Renderer>();
+    }
+    if (window_ != nullptr && !renderer_->is_initialized()) {
+        renderer_->initialize(window_);
+    }
 }
 
 PlayerViewport::~PlayerViewport() {
+    if (renderer_) {
+        renderer_->shutdown();
+    }
     if (window_ != nullptr && IsWindow(window_) != FALSE) {
         SetWindowLongPtrW(window_, GWLP_USERDATA, 0);
         DestroyWindow(window_);
@@ -90,6 +103,9 @@ PlayerViewport::~PlayerViewport() {
 void PlayerViewport::move(int x, int y, int width, int height, bool repaint) {
     if (window_ != nullptr) {
         MoveWindow(window_, x, y, width, height, repaint ? TRUE : FALSE);
+        if (renderer_) {
+            renderer_->resize(width, height);
+        }
     }
 }
 
@@ -126,6 +142,39 @@ void PlayerViewport::update_runtime_state(const fang::broker::RuntimeStatusData&
     if (state_changed && window_ != nullptr) {
         InvalidateRect(window_, nullptr, FALSE);
     }
+}
+
+void PlayerViewport::update_session_state(const StudioSessionSnapshot& session) {
+    session_ = session;
+    fang::broker::RuntimeStatusData status;
+    status.generation_id = session.generation_id;
+    status.avd_name = session.avd_name;
+    status.adb_serial = session.adb_serial;
+    status.process_id = session.process_id;
+    status.guest_ready = session.guest_ready;
+    status.diagnostic = session.diagnostic;
+
+    switch (session.phase) {
+    case StudioSessionPhase::NotStarted:
+    case StudioSessionPhase::Stopped:
+        status.state = fang::broker::RuntimeLifecycleState::Stopped;
+        break;
+    case StudioSessionPhase::Starting:
+        status.state = fang::broker::RuntimeLifecycleState::Starting;
+        break;
+    case StudioSessionPhase::ReadyAwaitingVideo:
+    case StudioSessionPhase::ActiveStreaming:
+        status.state = fang::broker::RuntimeLifecycleState::Ready;
+        break;
+    case StudioSessionPhase::Stopping:
+        status.state = fang::broker::RuntimeLifecycleState::Stopping;
+        break;
+    case StudioSessionPhase::Failed:
+        status.state = fang::broker::RuntimeLifecycleState::Failed;
+        break;
+    }
+
+    update_runtime_state(status, false);
 }
 
 void PlayerViewport::set_presentation_mode(bool embedded) {
@@ -182,6 +231,15 @@ LRESULT PlayerViewport::handle_message(UINT message, WPARAM w_param, LPARAM l_pa
     }
     case WM_ERASEBKGND:
         return 1; // Prevent flicker; painted in WM_PAINT
+    case WM_SIZE: {
+        const int w = LOWORD(l_param);
+        const int h = HIWORD(l_param);
+        if (renderer_) {
+            renderer_->resize(w, h);
+        }
+        InvalidateRect(window_, nullptr, FALSE);
+        return 0;
+    }
     case WM_SETFOCUS:
         has_focus_ = true;
         InvalidateRect(window_, nullptr, FALSE);
@@ -287,103 +345,57 @@ void PlayerViewport::paint(HDC target_dc) {
     const int height = client_rect.bottom - client_rect.top;
     if (width <= 0 || height <= 0) return;
 
-    HDC mem_dc = CreateCompatibleDC(target_dc);
-    HBITMAP mem_bitmap = CreateCompatibleBitmap(target_dc, width, height);
-    auto* old_bitmap = SelectObject(mem_dc, mem_bitmap);
-
-    // 1. Fill container background
-    HBRUSH bg_brush = CreateSolidBrush(RGB(24, 27, 34));
-    FillRect(mem_dc, &client_rect, bg_brush);
-    DeleteObject(bg_brush);
-
-    // 2. Focus banner and border
-    const RECT header_rect{client_rect.left + 4, client_rect.top + 4, client_rect.right - 4, client_rect.top + 26};
-    SetBkMode(mem_dc, TRANSPARENT);
-    SelectObject(mem_dc, font_small_);
-    if (has_focus_) {
-        SetTextColor(mem_dc, RGB(0, 190, 255));
-        DrawTextW(mem_dc, L"[ Active Focus  |  Press Esc to return to host controls ]", -1,
-            const_cast<LPRECT>(&header_rect), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    } else {
-        SetTextColor(mem_dc, RGB(140, 150, 165));
-        DrawTextW(mem_dc, L"[ Viewport Unfocused  |  Click inside to interact ]", -1,
-            const_cast<LPRECT>(&header_rect), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
-
-    // 3. Calculate device screen rectangle (leave space for header/footer and bezel)
-    RECT inner_area{client_rect.left + 8, client_rect.top + 28, client_rect.right - 8, client_rect.bottom - 28};
-    RECT screen_rect = calculate_display_viewport_rect(inner_area, {});
-
-    // 4. Draw outer phone bezel
-    RECT bezel_rect{screen_rect.left - 6, screen_rect.top - 6, screen_rect.right + 6, screen_rect.bottom + 6};
-    HBRUSH bezel_brush = CreateSolidBrush(RGB(40, 44, 52));
-    HPEN bezel_pen = CreatePen(PS_SOLID, 1, has_focus_ ? RGB(0, 162, 237) : RGB(65, 72, 85));
-    SelectObject(mem_dc, bezel_brush);
-    SelectObject(mem_dc, bezel_pen);
-    RoundRect(mem_dc, bezel_rect.left, bezel_rect.top, bezel_rect.right, bezel_rect.bottom, 12, 12);
-    DeleteObject(bezel_brush);
-    DeleteObject(bezel_pen);
-
-    // 5. Draw screen area
-    const COLORREF screen_bg = background_color_for_state(cached_status_.state);
-    HBRUSH screen_brush = CreateSolidBrush(screen_bg);
-    FillRect(mem_dc, &screen_rect, screen_brush);
-    DeleteObject(screen_brush);
-
-    // 6. Draw state-dependent screen content
-    SelectObject(mem_dc, font_title_);
-    SetBkMode(mem_dc, TRANSPARENT);
-
-    const int screen_width = screen_rect.right - screen_rect.left;
-    const int screen_height = screen_rect.bottom - screen_rect.top;
-
+    // Check if we have a live streaming frame
     std::shared_ptr<const VideoFrame> live_frame;
     if (video_consumer_ != nullptr && embedded_) {
         live_frame = video_consumer_->current_frame();
     }
 
-    if (cached_status_.state == fang::broker::RuntimeLifecycleState::Ready && cached_status_.guest_ready) {
-        if (live_frame && live_frame->is_valid() && screen_width > 0 && screen_height > 0) {
-            // Live video frame presentation via StretchDIBits
-            BITMAPINFO bmi{};
-            bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-            bmi.bmiHeader.biWidth = static_cast<LONG>(live_frame->width);
-            bmi.bmiHeader.biHeight = -static_cast<LONG>(live_frame->height); // top-down DIB
-            bmi.bmiHeader.biPlanes = 1;
-            bmi.bmiHeader.biBitCount = 32;
-            bmi.bmiHeader.biCompression = BI_RGB;
+    RECT inner_area{client_rect.left + 8, client_rect.top + 28, client_rect.right - 8, client_rect.bottom - 28};
+    RECT screen_rect = calculate_display_viewport_rect(inner_area, {});
+    const int screen_width = screen_rect.right - screen_rect.left;
+    const int screen_height = screen_rect.bottom - screen_rect.top;
 
-            const void* pixel_data = live_frame->pixels->data();
-            std::vector<std::uint8_t> converted_pixels;
-            if (live_frame->format == VideoPixelFormat::RGBA8888) {
-                converted_pixels.resize(live_frame->pixels->size());
-                const auto* src = live_frame->pixels->data();
-                auto* dst = converted_pixels.data();
-                const std::size_t total_pixels = static_cast<std::size_t>(live_frame->width) * live_frame->height;
-                for (std::size_t i = 0; i < total_pixels; ++i) {
-                    dst[i * 4 + 0] = src[i * 4 + 2]; // B
-                    dst[i * 4 + 1] = src[i * 4 + 1]; // G
-                    dst[i * 4 + 2] = src[i * 4 + 0]; // R
-                    dst[i * 4 + 3] = src[i * 4 + 3]; // A
-                }
-                pixel_data = converted_pixels.data();
-            }
+    const bool is_ready = (cached_status_.state == fang::broker::RuntimeLifecycleState::Ready && cached_status_.guest_ready);
+    const bool can_render_video = is_ready && live_frame && live_frame->is_valid() && screen_width > 0 && screen_height > 0;
 
-            SetStretchBltMode(mem_dc, COLORONCOLOR);
-            StretchDIBits(mem_dc,
-                screen_rect.left, screen_rect.top,
-                screen_width, screen_height,
-                0, 0, live_frame->width, live_frame->height,
-                pixel_data, &bmi, DIB_RGB_COLORS, SRCCOPY);
+    // Overlay painter lambda to draw bezel, banners, watermark badge, touch feedback, and footer
+    auto draw_overlays = [&](HDC dc) {
+        // 1. Focus banner and border
+        const RECT header_rect{client_rect.left + 4, client_rect.top + 4, client_rect.right - 4, client_rect.top + 26};
+        SetBkMode(dc, TRANSPARENT);
+        SelectObject(dc, font_small_);
+        if (has_focus_) {
+            SetTextColor(dc, RGB(0, 190, 255));
+            DrawTextW(dc, L"[ Active Focus  |  Press Esc to return to host controls ]", -1,
+                const_cast<LPRECT>(&header_rect), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        } else {
+            SetTextColor(dc, RGB(140, 150, 165));
+            DrawTextW(dc, L"[ Viewport Unfocused  |  Click inside to interact ]", -1,
+                const_cast<LPRECT>(&header_rect), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
 
+        // 2. Draw outer phone bezel
+        RECT bezel_rect{screen_rect.left - 6, screen_rect.top - 6, screen_rect.right + 6, screen_rect.bottom + 6};
+        HBRUSH bezel_brush = CreateSolidBrush(RGB(40, 44, 52));
+        HPEN bezel_pen = CreatePen(PS_SOLID, 1, has_focus_ ? RGB(0, 162, 237) : RGB(65, 72, 85));
+        SelectObject(dc, bezel_brush);
+        SelectObject(dc, bezel_pen);
+        RoundRect(dc, bezel_rect.left, bezel_rect.top, bezel_rect.right, bezel_rect.bottom, 12, 12);
+        DeleteObject(bezel_brush);
+        DeleteObject(bezel_pen);
+
+        if (can_render_video) {
             // Watermark & transport diagnostic overlay
-            SelectObject(mem_dc, font_small_);
-            SetBkMode(mem_dc, TRANSPARENT);
-            SetTextColor(mem_dc, RGB(0, 255, 180));
+            SelectObject(dc, font_small_);
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, RGB(0, 255, 180));
+            std::wstring backend_badge = renderer_ && renderer_->active_backend() == ViewportBackend::Direct3D11
+                ? L" | D3D11 HW" : L" | GDI Fallback";
             std::wstring live_badge = L"[LIVE STREAM] " + std::to_wstring(live_frame->width) + L"x" +
-                std::to_wstring(live_frame->height) + L" | Frame #" + std::to_wstring(live_frame->sequence);
+                std::to_wstring(live_frame->height) + L" | Frame #" + std::to_wstring(live_frame->sequence) + backend_badge;
             RECT live_rect{screen_rect.left + 8, screen_rect.top + 8, screen_rect.right - 8, screen_rect.top + 26};
-            DrawTextW(mem_dc, live_badge.c_str(), -1, &live_rect, DT_LEFT | DT_SINGLELINE);
+            DrawTextW(dc, live_badge.c_str(), -1, &live_rect, DT_LEFT | DT_SINGLELINE);
 
             // Touch feedback indicator on top of video frame
             if (active_touch_pt_.has_value()) {
@@ -394,69 +406,145 @@ void PlayerViewport::paint(HDC target_dc) {
 
                 HPEN touch_pen = CreatePen(PS_SOLID, 2, RGB(0, 255, 180));
                 HBRUSH touch_brush = CreateSolidBrush(RGB(0, 180, 140));
-                SelectObject(mem_dc, touch_pen);
-                SelectObject(mem_dc, touch_brush);
-                Ellipse(mem_dc, touch_screen_x - 12, touch_screen_y - 12, touch_screen_x + 12, touch_screen_y + 12);
+                SelectObject(dc, touch_pen);
+                SelectObject(dc, touch_brush);
+                Ellipse(dc, touch_screen_x - 12, touch_screen_y - 12, touch_screen_x + 12, touch_screen_y + 12);
                 DeleteObject(touch_pen);
                 DeleteObject(touch_brush);
             }
 
-            // Screen footer info
-            SelectObject(mem_dc, font_small_);
-            SetTextColor(mem_dc, RGB(180, 230, 250));
-            RECT footer_info{screen_rect.left + 10, screen_rect.bottom - 36, screen_rect.right - 10, screen_rect.bottom - 8};
-            DrawTextW(mem_dc, L"Video Transport: ACTIVE  |  Touch & Input: ACTIVE\r\nEmbedded Live Surface", -1,
-                &footer_info, DT_CENTER);
-        } else {
-            // Active Ready screen fallback placeholder
-            SetTextColor(mem_dc, RGB(0, 220, 180));
-            RECT title_rect{screen_rect.left + 10, screen_rect.top + 16, screen_rect.right - 10, screen_rect.top + 40};
-            DrawTextW(mem_dc, L"Android Reference Guest", -1, &title_rect, DT_CENTER | DT_SINGLELINE);
+            // Screen footer info with host upload/present metrics
+            SelectObject(dc, font_small_);
+            SetTextColor(dc, RGB(180, 230, 250));
+            RECT footer_info{screen_rect.left + 10, screen_rect.bottom - 44, screen_rect.right - 10, screen_rect.bottom - 8};
 
-            SelectObject(mem_dc, font_body_);
-            SetTextColor(mem_dc, RGB(180, 210, 230));
-            RECT sub_rect{screen_rect.left + 10, screen_rect.top + 42, screen_rect.right - 10, screen_rect.top + 64};
-            std::wstring serial_info = L"Online | " + std::wstring(cached_status_.adb_serial.begin(), cached_status_.adb_serial.end());
-            DrawTextW(mem_dc, serial_info.c_str(), -1, &sub_rect, DT_CENTER | DT_SINGLELINE);
-
-            // Grid lines to visualize touch surface
-            HPEN grid_pen = CreatePen(PS_DOT, 1, RGB(20, 50, 68));
-            SelectObject(mem_dc, grid_pen);
-            for (int y = screen_rect.top + 80; y < screen_rect.bottom - 60; y += 40) {
-                MoveToEx(mem_dc, screen_rect.left + 10, y, nullptr);
-                LineTo(mem_dc, screen_rect.right - 10, y);
+            std::wstring metrics_line = L"";
+            if (renderer_) {
+                const auto m = renderer_->metrics();
+                metrics_line = L"\r\nUpload: " + std::to_wstring(m.last_upload_duration_us) + L" us | Present: " +
+                    std::to_wstring(m.last_present_duration_us) + L" us";
             }
-            for (int x = screen_rect.left + 30; x < screen_rect.right; x += 40) {
-                MoveToEx(mem_dc, x, screen_rect.top + 80, nullptr);
-                LineTo(mem_dc, x, screen_rect.bottom - 60);
-            }
-            DeleteObject(grid_pen);
+            std::wstring backend_title = renderer_ && renderer_->active_backend() == ViewportBackend::Direct3D11
+                ? L"Presentation: Direct3D 11 (Hardware Accelerated)"
+                : L"Presentation: GDI (Software Fallback)";
 
-            // Touch feedback indicator
-            if (active_touch_pt_.has_value()) {
-                const double norm_x = static_cast<double>(active_touch_pt_->x) / 1080.0;
-                const double norm_y = static_cast<double>(active_touch_pt_->y) / 1920.0;
-                const int touch_screen_x = screen_rect.left + static_cast<int>(norm_x * screen_width);
-                const int touch_screen_y = screen_rect.top + static_cast<int>(norm_y * screen_height);
-
-                HPEN touch_pen = CreatePen(PS_SOLID, 2, RGB(0, 255, 180));
-                HBRUSH touch_brush = CreateSolidBrush(RGB(0, 180, 140));
-                SelectObject(mem_dc, touch_pen);
-                SelectObject(mem_dc, touch_brush);
-                Ellipse(mem_dc, touch_screen_x - 12, touch_screen_y - 12, touch_screen_x + 12, touch_screen_y + 12);
-                DeleteObject(touch_pen);
-                DeleteObject(touch_brush);
-            }
-
-            // Screen footer info
-            SelectObject(mem_dc, font_small_);
-            SetTextColor(mem_dc, RGB(120, 170, 190));
-            RECT footer_info{screen_rect.left + 10, screen_rect.bottom - 36, screen_rect.right - 10, screen_rect.bottom - 8};
-            DrawTextW(mem_dc, L"Touch & Keyboard Forwarding: ACTIVE\r\nResolution: 1080x1920 logical (awaiting video transport)", -1,
-                &footer_info, DT_CENTER);
+            std::wstring footer_text = backend_title + metrics_line;
+            DrawTextW(dc, footer_text.c_str(), -1, &footer_info, DT_CENTER);
         }
+
+        // Viewport footer info
+        RECT bottom_rect{client_rect.left + 8, client_rect.bottom - 24, client_rect.right - 8, client_rect.bottom - 4};
+        SelectObject(dc, font_small_);
+        SetTextColor(dc, RGB(110, 120, 135));
+        std::wstring stage_footer = renderer_ && renderer_->active_backend() == ViewportBackend::Direct3D11
+            ? L"Stage 4 Integrated Studio Viewport | Direct3D 11 (Hardware Accelerated)"
+            : L"Stage 4 Integrated Studio Viewport | GDI (Software Fallback)";
+        DrawTextW(dc, stage_footer.c_str(), -1, const_cast<LPRECT>(&bottom_rect), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    };
+
+    if (can_render_video && renderer_ && renderer_->active_backend() == ViewportBackend::Direct3D11) {
+        if (renderer_->present_frame(*live_frame, screen_rect, draw_overlays, nullptr)) {
+            return;
+        }
+    }
+
+    // GDI Rendering Path (either when fallback is active, non-video state, or D3D11 unavailable)
+    HDC mem_dc = CreateCompatibleDC(target_dc);
+    HBITMAP mem_bitmap = CreateCompatibleBitmap(target_dc, width, height);
+    auto* old_bitmap = SelectObject(mem_dc, mem_bitmap);
+
+    // 1. Fill container background
+    HBRUSH bg_brush = CreateSolidBrush(RGB(24, 27, 34));
+    FillRect(mem_dc, &client_rect, bg_brush);
+    DeleteObject(bg_brush);
+
+    // 2. Draw screen background
+    const COLORREF screen_bg = background_color_for_state(cached_status_.state);
+    HBRUSH screen_brush = CreateSolidBrush(screen_bg);
+    FillRect(mem_dc, &screen_rect, screen_brush);
+    DeleteObject(screen_brush);
+
+    if (can_render_video) {
+        // Present via renderer GDI fallback path
+        if (renderer_) {
+            renderer_->present_frame(*live_frame, screen_rect, draw_overlays, mem_dc);
+        }
+    } else if (is_ready) {
+        // Active Ready screen / Waiting for first video frame
+        draw_overlays(mem_dc);
+        SelectObject(mem_dc, font_title_);
+        SetTextColor(mem_dc, RGB(0, 220, 180));
+        RECT title_rect{screen_rect.left + 10, screen_rect.top + 16, screen_rect.right - 10, screen_rect.top + 40};
+        DrawTextW(mem_dc, L"Android Reference Guest", -1, &title_rect, DT_CENTER | DT_SINGLELINE);
+
+        SelectObject(mem_dc, font_body_);
+        SetTextColor(mem_dc, RGB(180, 210, 230));
+        RECT sub_rect{screen_rect.left + 10, screen_rect.top + 42, screen_rect.right - 10, screen_rect.top + 64};
+        std::wstring serial_info = L"Online | Target: " + std::wstring(cached_status_.adb_serial.begin(), cached_status_.adb_serial.end());
+        DrawTextW(mem_dc, serial_info.c_str(), -1, &sub_rect, DT_CENTER | DT_SINGLELINE);
+
+        // Grid lines to visualize touch surface
+        HPEN grid_pen = CreatePen(PS_DOT, 1, RGB(20, 50, 68));
+        SelectObject(mem_dc, grid_pen);
+        for (int y = screen_rect.top + 80; y < screen_rect.bottom - 60; y += 40) {
+            MoveToEx(mem_dc, screen_rect.left + 10, y, nullptr);
+            LineTo(mem_dc, screen_rect.right - 10, y);
+        }
+        for (int x = screen_rect.left + 30; x < screen_rect.right; x += 40) {
+            MoveToEx(mem_dc, x, screen_rect.top + 80, nullptr);
+            LineTo(mem_dc, x, screen_rect.bottom - 60);
+        }
+        DeleteObject(grid_pen);
+
+        // Center message indicating first frame wait
+        RECT center_box{screen_rect.left + 12, screen_rect.top + screen_height / 3,
+            screen_rect.right - 12, screen_rect.top + screen_height / 3 + 30};
+        SelectObject(mem_dc, font_title_);
+        SetTextColor(mem_dc, RGB(255, 200, 70));
+        DrawTextW(mem_dc, L"[WAITING FOR FIRST VIDEO FRAME]", -1, &center_box, DT_CENTER | DT_SINGLELINE);
+
+        SelectObject(mem_dc, font_body_);
+        SetTextColor(mem_dc, RGB(160, 185, 210));
+        RECT center_hint{screen_rect.left + 12, screen_rect.top + screen_height / 3 + 32,
+            screen_rect.right - 12, screen_rect.top + screen_height / 3 + 80};
+        DrawTextW(mem_dc, L"Runtime is ready. Shared-memory video transport attached.", -1, &center_hint, DT_CENTER | DT_WORDBREAK);
+
+        if (session_.input_state == StudioInputBindingState::AmbiguousOrMultiple) {
+            RECT ambig_rect{screen_rect.left + 10, screen_rect.top + screen_height / 2 + 30,
+                screen_rect.right - 10, screen_rect.top + screen_height / 2 + 70};
+            SetTextColor(mem_dc, RGB(255, 100, 100));
+            DrawTextW(mem_dc, L"[INPUT BLOCKED: Ambiguous ADB Target]", -1, &ambig_rect, DT_CENTER | DT_SINGLELINE);
+        }
+
+        // Touch feedback indicator
+        if (active_touch_pt_.has_value()) {
+            const double norm_x = static_cast<double>(active_touch_pt_->x) / 1080.0;
+            const double norm_y = static_cast<double>(active_touch_pt_->y) / 1920.0;
+            const int touch_screen_x = screen_rect.left + static_cast<int>(norm_x * screen_width);
+            const int touch_screen_y = screen_rect.top + static_cast<int>(norm_y * screen_height);
+
+            HPEN touch_pen = CreatePen(PS_SOLID, 2, RGB(0, 255, 180));
+            HBRUSH touch_brush = CreateSolidBrush(RGB(0, 180, 140));
+            SelectObject(mem_dc, touch_pen);
+            SelectObject(mem_dc, touch_brush);
+            Ellipse(mem_dc, touch_screen_x - 12, touch_screen_y - 12, touch_screen_x + 12, touch_screen_y + 12);
+            DeleteObject(touch_pen);
+            DeleteObject(touch_brush);
+        }
+
+        SelectObject(mem_dc, font_small_);
+        SetTextColor(mem_dc, RGB(120, 170, 190));
+        RECT footer_info{screen_rect.left + 10, screen_rect.bottom - 36, screen_rect.right - 10, screen_rect.bottom - 8};
+        std::wstring input_line = session_.input_state == StudioInputBindingState::Bound
+            ? L"Touch & Keyboard Forwarding: ACTIVE"
+            : (session_.input_state == StudioInputBindingState::AmbiguousOrMultiple
+                ? L"Touch & Keyboard Forwarding: BLOCKED (Ambiguous Target)"
+                : L"Touch & Keyboard Forwarding: UNAVAILABLE");
+        DrawTextW(mem_dc, (input_line + L"\r\nResolution: 1080x1920 logical (awaiting video transport)").c_str(), -1,
+            &footer_info, DT_CENTER);
     } else {
         // Stopped, Booting, Stopping, or Failed
+        draw_overlays(mem_dc);
         SetTextColor(mem_dc, RGB(220, 225, 235));
         RECT title_rect{screen_rect.left + 10, screen_rect.top + screen_height / 3,
             screen_rect.right - 10, screen_rect.top + screen_height / 3 + 30};
@@ -487,13 +575,6 @@ void PlayerViewport::paint(HDC target_dc) {
             screen_rect.right - 12, title_rect.bottom + 60};
         DrawTextW(mem_dc, hint_label.c_str(), -1, &hint_rect, DT_CENTER | DT_WORDBREAK);
     }
-
-    // 7. Viewport footer info
-    RECT bottom_rect{client_rect.left + 8, client_rect.bottom - 24, client_rect.right - 8, client_rect.bottom - 4};
-    SelectObject(mem_dc, font_small_);
-    SetTextColor(mem_dc, RGB(110, 120, 135));
-    DrawTextW(mem_dc, L"Stage 2D Video Transport and Presentation", -1,
-        const_cast<LPRECT>(&bottom_rect), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     BitBlt(target_dc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
     SelectObject(mem_dc, old_bitmap);

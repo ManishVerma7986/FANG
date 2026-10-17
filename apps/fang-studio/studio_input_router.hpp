@@ -40,6 +40,8 @@ enum class InputRoutingResult {
     Success,
     DroppedGuestNotReady,
     DroppedQueueFull,
+    DroppedNoTargetIdentity,
+    DroppedAmbiguousTarget,
     IgnoredUnmappedKey,
     IgnoredOutOfRange
 };
@@ -79,6 +81,9 @@ public:
 
     void set_dispatcher(std::shared_ptr<IInputDispatcher> dispatcher);
     void set_adb_serial(std::string serial);
+    std::string adb_serial() const;
+    void set_target_ambiguous(bool ambiguous) noexcept;
+    bool is_target_ambiguous() const noexcept;
     void set_guest_ready(bool ready);
     bool is_guest_ready() const noexcept;
 
@@ -92,6 +97,7 @@ public:
 
     std::size_t queued_event_count() const;
     std::size_t dropped_event_count() const;
+    void clear_queue();
     void flush();
 
 private:
@@ -102,6 +108,7 @@ private:
     const std::size_t max_queue_depth_;
     mutable std::mutex mutex_;
     bool guest_ready_{};
+    bool target_ambiguous_{};
     std::size_t dropped_events_{};
     std::deque<InputEvent> queue_;
 };

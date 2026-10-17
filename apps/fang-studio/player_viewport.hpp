@@ -6,7 +6,9 @@
 
 #include "broker_protocol.hpp"
 #include "studio_input_router.hpp"
+#include "studio_session.hpp"
 #include "video_transport.hpp"
+#include "viewport_renderer.hpp"
 
 #include <memory>
 #include <optional>
@@ -22,7 +24,8 @@ public:
 
     PlayerViewport(HWND parent, HINSTANCE instance, int control_id,
         std::shared_ptr<StudioInputRouter> router,
-        std::shared_ptr<StudioVideoConsumer> video_consumer = nullptr);
+        std::shared_ptr<StudioVideoConsumer> video_consumer = nullptr,
+        std::unique_ptr<IViewportRenderer> renderer = nullptr);
     PlayerViewport(const PlayerViewport&) = delete;
     PlayerViewport& operator=(const PlayerViewport&) = delete;
     ~PlayerViewport();
@@ -33,15 +36,25 @@ public:
     void move(int x, int y, int width, int height, bool repaint = true);
     void show(bool visible = true);
     void update_runtime_state(const fang::broker::RuntimeStatusData& status, bool request_pending);
+    void update_session_state(const StudioSessionSnapshot& session);
     void set_presentation_mode(bool embedded);
     bool is_embedded() const noexcept { return embedded_; }
     bool has_focus() const noexcept { return has_focus_; }
     void release_focus_to_parent();
 
     const fang::broker::RuntimeStatusData& cached_status() const noexcept { return cached_status_; }
+    const StudioSessionSnapshot& session_state() const noexcept { return session_; }
     std::shared_ptr<StudioInputRouter> router() const noexcept { return router_; }
     std::shared_ptr<StudioVideoConsumer> video_consumer() const noexcept { return video_consumer_; }
     void set_video_consumer(std::shared_ptr<StudioVideoConsumer> consumer) noexcept { video_consumer_ = std::move(consumer); }
+
+    IViewportRenderer* renderer() const noexcept { return renderer_.get(); }
+    ViewportBackend active_backend() const noexcept {
+        return renderer_ ? renderer_->active_backend() : ViewportBackend::None;
+    }
+    ViewportPresentationMetrics presentation_metrics() const {
+        return renderer_ ? renderer_->metrics() : ViewportPresentationMetrics{};
+    }
 
 private:
     static LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM w_param, LPARAM l_param);
@@ -52,6 +65,7 @@ private:
     HWND parent_{};
     std::shared_ptr<StudioInputRouter> router_;
     fang::broker::RuntimeStatusData cached_status_;
+    StudioSessionSnapshot session_;
     bool request_pending_{};
     bool embedded_{true};
     bool has_focus_{};
@@ -62,6 +76,7 @@ private:
     HFONT font_body_{};
     HFONT font_small_{};
     std::shared_ptr<StudioVideoConsumer> video_consumer_;
+    std::unique_ptr<IViewportRenderer> renderer_;
 };
 
 }

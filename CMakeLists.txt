@@ -104,10 +104,13 @@ add_executable(fang-studio WIN32
     apps/fang-studio/main.cpp
     apps/fang-studio/player_viewport.cpp
     apps/fang-studio/studio_input_router.cpp
+    apps/fang-studio/adb_input_dispatcher.cpp
     apps/fang-studio/video_transport.cpp
+    apps/fang-studio/viewport_renderer.cpp
+    apps/fang-studio/studio_session.cpp
 )
 target_link_libraries(fang-studio PRIVATE fang_core fang_runtime fang_runtime_supervisor_client
-    fang_warnings User32 Gdi32)
+    fang_warnings User32 Gdi32 d3d11 dxgi d3dcompiler)
 target_compile_definitions(fang-studio PRIVATE UNICODE _UNICODE)
 
 add_executable(fang-runtime-broker
@@ -274,14 +277,17 @@ if(BUILD_TESTING)
         tests/unit/studio_player_tests.cpp
         apps/fang-studio/player_viewport.cpp
         apps/fang-studio/studio_input_router.cpp
+        apps/fang-studio/adb_input_dispatcher.cpp
         apps/fang-studio/video_transport.cpp
+        apps/fang-studio/viewport_renderer.cpp
+        apps/fang-studio/studio_session.cpp
     )
     target_include_directories(fang-studio-player-tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-studio"
     )
     target_link_libraries(fang-studio-player-tests PRIVATE
         fang_core fang_runtime fang_runtime_supervisor_client
-        fang_warnings User32 Gdi32
+        fang_warnings User32 Gdi32 d3d11 dxgi d3dcompiler
     )
     target_compile_definitions(fang-studio-player-tests PRIVATE UNICODE _UNICODE)
     add_test(NAME studio-player-unit COMMAND fang-studio-player-tests)
@@ -290,14 +296,17 @@ if(BUILD_TESTING)
         tests/unit/studio_video_tests.cpp
         apps/fang-studio/player_viewport.cpp
         apps/fang-studio/studio_input_router.cpp
+        apps/fang-studio/adb_input_dispatcher.cpp
         apps/fang-studio/video_transport.cpp
+        apps/fang-studio/viewport_renderer.cpp
+        apps/fang-studio/studio_session.cpp
     )
     target_include_directories(fang-studio-video-tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-studio"
     )
     target_link_libraries(fang-studio-video-tests PRIVATE
         fang_core fang_runtime fang_runtime_supervisor_client
-        fang_warnings User32 Gdi32
+        fang_warnings User32 Gdi32 d3d11 dxgi d3dcompiler
     )
     target_compile_definitions(fang-studio-video-tests PRIVATE UNICODE _UNICODE)
     add_test(NAME studio-video-unit COMMAND fang-studio-video-tests)

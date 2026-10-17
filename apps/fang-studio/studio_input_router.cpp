@@ -124,7 +124,28 @@ void StudioInputRouter::set_dispatcher(std::shared_ptr<IInputDispatcher> dispatc
 
 void StudioInputRouter::set_adb_serial(std::string serial) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (adb_serial_ != serial) {
+        queue_.clear();
+    }
     adb_serial_ = std::move(serial);
+}
+
+std::string StudioInputRouter::adb_serial() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return adb_serial_;
+}
+
+void StudioInputRouter::set_target_ambiguous(bool ambiguous) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    target_ambiguous_ = ambiguous;
+    if (ambiguous) {
+        queue_.clear();
+    }
+}
+
+bool StudioInputRouter::is_target_ambiguous() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return target_ambiguous_;
 }
 
 void StudioInputRouter::set_guest_ready(bool ready) {
@@ -212,9 +233,14 @@ std::size_t StudioInputRouter::dropped_event_count() const {
     return dropped_events_;
 }
 
+void StudioInputRouter::clear_queue() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    queue_.clear();
+}
+
 void StudioInputRouter::flush() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!dispatcher_ || !guest_ready_) {
+    if (!dispatcher_ || !guest_ready_ || target_ambiguous_ || adb_serial_.empty()) {
         queue_.clear();
         return;
     }
@@ -231,6 +257,16 @@ InputRoutingResult StudioInputRouter::enqueue_or_dispatch(InputEvent event) {
     if (!guest_ready_) {
         ++dropped_events_;
         return InputRoutingResult::DroppedGuestNotReady;
+    }
+
+    if (target_ambiguous_) {
+        ++dropped_events_;
+        return InputRoutingResult::DroppedAmbiguousTarget;
+    }
+
+    if (adb_serial_.empty()) {
+        ++dropped_events_;
+        return InputRoutingResult::DroppedNoTargetIdentity;
     }
 
     if (queue_.size() >= max_queue_depth_) {

@@ -19,7 +19,9 @@
 
 #include "player_viewport.hpp"
 #include "studio_input_router.hpp"
+#include "adb_input_dispatcher.hpp"
 #include "video_transport.hpp"
+#include "studio_session.hpp"
 
 namespace {
 
@@ -72,8 +74,10 @@ struct StudioApp {
     fang::studio::EmulatorInstallation emulator;
     std::unique_ptr<fang::studio::SupervisorRuntimeClient> runtime;
     std::shared_ptr<fang::studio::StudioInputRouter> input_router;
+    std::shared_ptr<fang::studio::AdbInputDispatcher> adb_dispatcher;
     std::shared_ptr<fang::studio::StudioVideoConsumer> video_consumer;
     std::shared_ptr<fang::studio::SharedMemoryVideoTransport> video_transport;
+    std::shared_ptr<fang::studio::StudioSessionController> session_controller;
     std::unique_ptr<fang::studio::PlayerViewport> player_viewport;
     std::string initialization_error;
     std::string runtime_initialization_error;
@@ -96,8 +100,18 @@ struct StudioApp {
 
     StudioApp() : logger(log_buffer, fang::core::LogLevel::Trace) {
         input_router = std::make_shared<fang::studio::StudioInputRouter>();
+        const auto adb_executable = fang::studio::discover_adb_executable();
+        if (!adb_executable.empty()) {
+            fang::studio::AdbInputDispatcherConfig input_cfg;
+            input_cfg.adb_executable = adb_executable;
+            adb_dispatcher = std::make_shared<fang::studio::AdbInputDispatcher>(input_cfg);
+            adb_dispatcher->start();
+            input_router->set_dispatcher(adb_dispatcher);
+        }
         video_consumer = std::make_shared<fang::studio::StudioVideoConsumer>(2);
         video_transport = std::make_shared<fang::studio::SharedMemoryVideoTransport>(video_consumer);
+        session_controller = std::make_shared<fang::studio::StudioSessionController>(
+            input_router, adb_dispatcher, video_consumer, video_transport);
         emulator = fang::studio::discover_android_emulator();
         const auto identity = fang::broker::current_user_identity();
         if (!identity.succeeded) {
@@ -185,10 +199,24 @@ using fang::broker::runtime_lifecycle_name;
 void update_view(StudioApp& app) {
     const auto core_text = "Core services: " + std::string(lifecycle_name(app.services.state()));
     SetWindowTextW(app.core_status, to_wide(core_text).c_str());
-    std::string runtime_text;
+
     const auto snapshot = app.runtime == nullptr
         ? fang::studio::SupervisorRuntimeSnapshot{}
         : app.runtime->snapshot();
+
+    fang::studio::StudioSessionSnapshot session_snap;
+    if (app.session_controller != nullptr) {
+        const auto active_backend = app.player_viewport ? app.player_viewport->active_backend() : fang::studio::ViewportBackend::None;
+        const auto presented_count = app.player_viewport ? app.player_viewport->presentation_metrics().frames_presented : 0;
+        session_snap = app.session_controller->update(snapshot, active_backend, presented_count);
+        if (app.player_viewport != nullptr) {
+            app.player_viewport->update_session_state(session_snap);
+        }
+    } else if (app.player_viewport != nullptr) {
+        app.player_viewport->update_runtime_state(snapshot.runtime, snapshot.request_pending);
+    }
+
+    std::string runtime_text;
     if (app.runtime == nullptr) {
         runtime_text = "Supervisor client unavailable: " + app.runtime_initialization_error;
     } else {
@@ -197,9 +225,21 @@ void update_view(StudioApp& app) {
             std::string(runtime_lifecycle_name(snapshot.runtime.state));
         if (selected == CB_ERR) runtime_text += " | select an installed AVD";
         if (!snapshot.runtime.avd_name.empty()) runtime_text += " | AVD=" + snapshot.runtime.avd_name;
-        if (!snapshot.runtime.adb_serial.empty()) runtime_text += " | " + snapshot.runtime.adb_serial;
+        if (!snapshot.runtime.adb_serial.empty()) {
+            runtime_text += " | " + snapshot.runtime.adb_serial;
+            if (session_snap.input_state == fang::studio::StudioInputBindingState::Bound) {
+                runtime_text += " (Input Bound)";
+            } else if (session_snap.input_state == fang::studio::StudioInputBindingState::AmbiguousOrMultiple) {
+                runtime_text += " (Input Ambiguous)";
+            }
+        }
         if (snapshot.runtime.process_id != 0) {
             runtime_text += " | PID=" + std::to_string(snapshot.runtime.process_id);
+        }
+        if (session_snap.video_state == fang::studio::StudioVideoState::Streaming) {
+            runtime_text += " | Video: Streaming";
+        } else if (session_snap.video_state == fang::studio::StudioVideoState::AwaitingFirstFrame) {
+            runtime_text += " | Video: Awaiting First Frame";
         }
         if (snapshot.runtime.elapsed_ms != 0) {
             runtime_text += " | " + std::to_string(snapshot.runtime.elapsed_ms) + " ms";
@@ -218,7 +258,7 @@ void update_view(StudioApp& app) {
         capability_text << "Core initialization error: " << app.initialization_error << "\r\n";
     }
     capability_text << "Reference mode: external Android Emulator window; display embedding and guest boot verification are not implemented.\r\n";
-    capability_text << "Stage 2C: Embedded player presentation viewport and coordinate-mapped input forwarding are active.\r\n";
+    capability_text << "Stage 4: Integrated Studio runtime session, Direct3D 11 presentation, and bound input forwarding are active.\r\n";
     SetWindowTextW(app.capability_list, to_wide(capability_text.str()).c_str());
 
     SetWindowTextW(app.log_view, to_wide(app.log_buffer.str()).c_str());
@@ -243,26 +283,6 @@ void update_view(StudioApp& app) {
     EnableWindow(app.open_player_button, app.runtime != nullptr &&
         (runtime_state == fang::broker::RuntimeLifecycleState::Ready ||
          runtime_state == fang::broker::RuntimeLifecycleState::OwnershipVerified));
-
-    if (app.player_viewport != nullptr) {
-        app.player_viewport->update_runtime_state(snapshot.runtime, snapshot.request_pending);
-    }
-
-    if (snapshot.runtime.state == fang::broker::RuntimeLifecycleState::Ready && snapshot.runtime.guest_ready) {
-        if (app.video_transport &&
-            (app.video_transport->state() == fang::studio::VideoTransportState::Disconnected ||
-             app.video_transport->state() == fang::studio::VideoTransportState::Closed ||
-             app.video_transport->state() == fang::studio::VideoTransportState::Error)) {
-            const auto endpoint = fang::studio::shared_memory_name_for_serial(snapshot.runtime.adb_serial);
-            if (endpoint.has_value()) {
-                app.video_transport->start(*endpoint);
-            }
-        }
-    } else if (app.video_transport &&
-               app.video_transport->state() != fang::studio::VideoTransportState::Disconnected &&
-               app.video_transport->state() != fang::studio::VideoTransportState::Closed) {
-        app.video_transport->stop();
-    }
 }
 
 void layout_controls(StudioApp& app, int width, int height) {
@@ -518,6 +538,9 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM w_param, LPA
                     auto result = app->services.stop();
                     if (!result) static_cast<void>(app->logger.write_error(result.error()));
                 }
+                if (app->session_controller != nullptr) {
+                    app->session_controller->notify_shutdown();
+                }
                 DestroyWindow(window);
                 return 0;
             }
@@ -537,10 +560,19 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM w_param, LPA
             auto result = app->services.stop();
             if (!result) static_cast<void>(app->logger.write_error(result.error()));
         }
+        if (app->session_controller != nullptr) {
+            app->session_controller->notify_shutdown();
+        }
         DestroyWindow(window);
         return 0;
     case WM_DESTROY:
         if (app != nullptr) {
+            if (app->session_controller != nullptr) {
+                app->session_controller->notify_shutdown();
+            }
+            if (app->adb_dispatcher != nullptr) {
+                app->adb_dispatcher->stop();
+            }
             if (app->video_transport != nullptr) {
                 app->video_transport->stop();
             }
