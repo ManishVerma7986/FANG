@@ -322,32 +322,9 @@ bool apply_private_acl(std::wstring_view path, std::wstring_view sid,
     return true;
 }
 
-bool validate_private_acl(std::wstring_view path, std::wstring_view sid,
-    std::string& error, DWORD& native_error) {
+bool validate_security_descriptor(PSECURITY_DESCRIPTOR descriptor, PSID owner, PACL dacl,
+    std::wstring_view sid, std::string& error, DWORD& native_error) {
     native_error = ERROR_SUCCESS;
-    const std::wstring path_string(path);
-    const DWORD attributes = GetFileAttributesW(path_string.c_str());
-    if (attributes == INVALID_FILE_ATTRIBUTES) {
-        native_error = GetLastError();
-        error = "Could not inspect ownership journal path: " + win32_error(native_error);
-        return false;
-    }
-    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        error = "Ownership journal paths may not contain a reparse point.";
-        return false;
-    }
-    PSID owner{};
-    PACL dacl{};
-    PSECURITY_DESCRIPTOR descriptor{};
-    const DWORD result = GetNamedSecurityInfoW(const_cast<LPWSTR>(path_string.c_str()),
-        SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-        &owner, nullptr, &dacl, nullptr, &descriptor);
-    if (result != ERROR_SUCCESS) {
-        native_error = result;
-        error = "Could not inspect ownership journal ACL: " + win32_error(result);
-        return false;
-    }
-    LocalMemory descriptor_memory(descriptor);
     PSID expected_owner{};
     if (ConvertStringSidToSidW(std::wstring(sid).c_str(), &expected_owner) == 0) {
         native_error = GetLastError();
@@ -417,6 +394,67 @@ bool validate_private_acl(std::wstring_view path, std::wstring_view sid,
         return false;
     }
     return true;
+}
+
+bool validate_private_acl(std::wstring_view path, std::wstring_view sid,
+    std::string& error, DWORD& native_error) {
+    native_error = ERROR_SUCCESS;
+    const std::wstring path_string(path);
+    const DWORD attributes = GetFileAttributesW(path_string.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        native_error = GetLastError();
+        error = "Could not inspect ownership journal path: " + win32_error(native_error);
+        return false;
+    }
+    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        error = "Ownership journal paths may not contain a reparse point.";
+        return false;
+    }
+    PSID owner{};
+    PACL dacl{};
+    PSECURITY_DESCRIPTOR descriptor{};
+    const DWORD result = GetNamedSecurityInfoW(const_cast<LPWSTR>(path_string.c_str()),
+        SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+        &owner, nullptr, &dacl, nullptr, &descriptor);
+    if (result != ERROR_SUCCESS) {
+        native_error = result;
+        error = "Could not inspect ownership journal ACL: " + win32_error(result);
+        return false;
+    }
+    LocalMemory descriptor_memory(descriptor);
+    return validate_security_descriptor(descriptor, owner, dacl, sid, error, native_error);
+}
+
+bool validate_private_acl_handle(HANDLE handle, std::wstring_view sid,
+    std::string& error, DWORD& native_error) {
+    native_error = ERROR_SUCCESS;
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (GetFileInformationByHandle(handle, &info) == 0) {
+        native_error = GetLastError();
+        error = "Could not inspect ownership journal handle: " + win32_error(native_error);
+        return false;
+    }
+    if ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        error = "Ownership journal paths may not contain a reparse point.";
+        return false;
+    }
+    if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        error = "Ownership journal path is a directory.";
+        return false;
+    }
+    PSID owner{};
+    PACL dacl{};
+    PSECURITY_DESCRIPTOR descriptor{};
+    const DWORD result = GetSecurityInfo(handle, SE_FILE_OBJECT,
+        OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+        &owner, nullptr, &dacl, nullptr, &descriptor);
+    if (result != ERROR_SUCCESS) {
+        native_error = result;
+        error = "Could not inspect ownership journal ACL: " + win32_error(result);
+        return false;
+    }
+    LocalMemory descriptor_memory(descriptor);
+    return validate_security_descriptor(descriptor, owner, dacl, sid, error, native_error);
 }
 
 bool ensure_directory(std::wstring_view path, std::wstring_view sid,
@@ -1208,6 +1246,500 @@ bool NativeOwnershipJournal::write_next_generation(const RuntimeSessionMetadata&
     std::wstring path;
     if (!journal_path(root, metadata.identity, path, error)) return false;
     return write_journal(path, sid, metadata, false, error);
+}
+
+bool NativeOwnershipJournal::get_journal_path(const std::wstring& root,
+    const CanonicalAvdIdentity& identity, std::wstring& path, std::string& error) {
+    std::wstring resolved_root;
+    if (!select_storage_root(root, resolved_root, error)) return false;
+    return journal_path(resolved_root, identity, path, error);
+}
+
+std::wstring NativeOwnershipJournal::get_owner_store_path(const std::wstring& root) {
+    std::string error;
+    std::wstring resolved_root;
+    if (!select_storage_root(root, resolved_root, error)) return {};
+    return owner_store_path(resolved_root);
+}
+
+bool NativeOwnershipJournal::apply_private_acl(const std::wstring& path,
+    const std::string& sid, std::string& error) {
+    const std::wstring wide_sid(sid.begin(), sid.end());
+    return ::fang::broker::apply_private_acl(path, wide_sid, error);
+}
+
+JournalLoadResult NativeOwnershipJournal::verify_durable_finalized(
+    const CanonicalAvdIdentity& identity,
+    std::string_view expected_generation,
+    const std::wstring& storage_root) {
+    if (!identity.valid() || !valid_generation(expected_generation)) {
+        return {JournalLoadState::IdentityMismatch, std::nullopt,
+            "Identity or expected generation is invalid."};
+    }
+    std::string error;
+    std::wstring root;
+    if (!select_storage_root(storage_root, root, error)) {
+        return {JournalLoadState::Failed, std::nullopt, std::move(error)};
+    }
+    const DWORD root_attr = GetFileAttributesW(root.c_str());
+    if (root_attr == INVALID_FILE_ATTRIBUTES) {
+        const DWORD native_error = GetLastError();
+        if (native_error == ERROR_ACCESS_DENIED) {
+            return {JournalLoadState::AccessDenied, std::nullopt,
+                "Ownership storage directory access denied: " + win32_error(native_error)};
+        }
+        if (native_error == ERROR_FILE_NOT_FOUND || native_error == ERROR_PATH_NOT_FOUND) {
+            std::string root_u8;
+            wide_to_utf8(root, root_u8);
+            return {JournalLoadState::Missing, std::nullopt,
+                "Ownership storage directory does not exist: " + root_u8};
+        }
+        return {JournalLoadState::Failed, std::nullopt,
+            "Could not inspect ownership storage directory: " + win32_error(native_error)};
+    }
+    if ((root_attr & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        return {JournalLoadState::Failed, std::nullopt,
+            "Ownership storage path is not a directory."};
+    }
+    if ((root_attr & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return {JournalLoadState::Corrupt, std::nullopt,
+            "Ownership storage directory may not be a reparse point."};
+    }
+
+    const std::wstring wide_user_sid(identity.user_sid.begin(), identity.user_sid.end());
+
+    // 1. Verify owner-index.fji contains this exact generation as EmptyVerified (state = 2)
+    const auto store_path = owner_store_path(root);
+    HANDLE store_handle = CreateFileW(store_path.c_str(), GENERIC_READ | READ_CONTROL,
+        FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (store_handle == INVALID_HANDLE_VALUE) {
+        const DWORD native_error = GetLastError();
+        if (native_error == ERROR_FILE_NOT_FOUND || native_error == ERROR_PATH_NOT_FOUND) {
+            return {JournalLoadState::Missing, std::nullopt, "owner-index.fji does not exist."};
+        }
+        if (native_error == ERROR_ACCESS_DENIED) {
+            return {JournalLoadState::AccessDenied, std::nullopt, win32_error(native_error)};
+        }
+        return {JournalLoadState::Failed, std::nullopt, win32_error(native_error)};
+    }
+    ScopedHandle scoped_store(store_handle);
+    std::string acl_error;
+    DWORD acl_native_error = ERROR_SUCCESS;
+    if (!validate_private_acl_handle(scoped_store.get(), wide_user_sid, acl_error, acl_native_error)) {
+        const auto state = acl_native_error == ERROR_ACCESS_DENIED ? JournalLoadState::AccessDenied :
+            acl_native_error == ERROR_SUCCESS ? JournalLoadState::Corrupt : JournalLoadState::Failed;
+        return {state, std::nullopt, "owner-index.fji security validation failed: " + acl_error};
+    }
+    LARGE_INTEGER store_size{};
+    if (GetFileSizeEx(scoped_store.get(), &store_size) == 0) {
+        return {JournalLoadState::Failed, std::nullopt, win32_error(GetLastError())};
+    }
+    if (store_size.QuadPart < 10 || store_size.QuadPart > maximum_journal_size) {
+        return {JournalLoadState::Corrupt, std::nullopt, "owner-index.fji size is out of bounds or truncated."};
+    }
+    std::vector<std::byte> store_bytes(static_cast<std::size_t>(store_size.QuadPart));
+    DWORD store_read{};
+    if (ReadFile(scoped_store.get(), store_bytes.data(), static_cast<DWORD>(store_bytes.size()),
+            &store_read, nullptr) == 0 || store_read != store_bytes.size()) {
+        return {JournalLoadState::Failed, std::nullopt, win32_error(GetLastError())};
+    }
+    if (!std::equal(store_magic.begin(), store_magic.end(), store_bytes.begin())) {
+        return {JournalLoadState::Corrupt, std::nullopt, "owner-index.fji magic mismatch."};
+    }
+    std::size_t store_offset = store_magic.size();
+    std::uint16_t store_version{};
+    if (!take_u16(store_bytes, store_offset, store_version)) {
+        return {JournalLoadState::Corrupt, std::nullopt, "owner-index.fji is truncated."};
+    }
+    if (store_version != 1) {
+        return {JournalLoadState::Unsupported, std::nullopt, "owner-index.fji version is unsupported."};
+    }
+    std::string store_owner_generation;
+    if (!take_text(store_bytes, store_offset, store_owner_generation)) {
+        return {JournalLoadState::Corrupt, std::nullopt, "owner-index.fji owner generation malformed."};
+    }
+    std::uint32_t entry_count{};
+    if (!take_u32(store_bytes, store_offset, entry_count) || entry_count > 4096) {
+        return {JournalLoadState::Corrupt, std::nullopt, "owner-index.fji entry count is invalid."};
+    }
+
+    bool found_entry = false;
+    std::uint8_t indexed_state = 0;
+    std::string indexed_gen;
+    std::string indexed_sid;
+    std::vector<std::string> seen_keys;
+
+    for (std::uint32_t i = 0; i < entry_count; ++i) {
+        std::string entry_sid;
+        std::string entry_loc;
+        std::string entry_gen;
+        if (!take_text(store_bytes, store_offset, entry_sid) ||
+            !take_text(store_bytes, store_offset, entry_loc) ||
+            !take_text(store_bytes, store_offset, entry_gen) ||
+            store_offset >= store_bytes.size()) {
+            return {JournalLoadState::Corrupt, std::nullopt, "owner-index.fji entry is truncated."};
+        }
+        const std::uint8_t state_byte = std::to_integer<std::uint8_t>(store_bytes[store_offset++]);
+        if (state_byte > 2) {
+            return {JournalLoadState::Corrupt, std::nullopt, "owner-index.fji entry state is invalid."};
+        }
+        const CanonicalAvdIdentity entry_id{entry_sid, entry_loc};
+        const auto entry_k = entry_id.key();
+        if (std::find(seen_keys.begin(), seen_keys.end(), entry_k) != seen_keys.end()) {
+            return {JournalLoadState::Corrupt, std::nullopt, "owner-index.fji contains duplicate identities."};
+        }
+        seen_keys.push_back(entry_k);
+
+        if (entry_loc == identity.canonical_avd_location) {
+            found_entry = true;
+            indexed_sid = std::move(entry_sid);
+            indexed_gen = std::move(entry_gen);
+            indexed_state = state_byte;
+        }
+    }
+
+    if (store_offset != store_bytes.size()) {
+        return {JournalLoadState::Corrupt, std::nullopt, "owner-index.fji has trailing data."};
+    }
+    if (!found_entry) {
+        return {JournalLoadState::Missing, std::nullopt,
+            "owner-index.fji does not contain an entry for canonical AVD location."};
+    }
+    if (indexed_sid != identity.user_sid) {
+        return {JournalLoadState::IdentityMismatch, std::nullopt,
+            "owner-index.fji entry user SID mismatch (" + indexed_sid + " != " + identity.user_sid + ")."};
+    }
+    if (indexed_gen != expected_generation) {
+        return {JournalLoadState::Stale, std::nullopt,
+            "owner-index.fji entry generation is stale or mismatched (" + indexed_gen +
+            " != " + std::string(expected_generation) + ")."};
+    }
+    if (indexed_state != 2) { // 2 = OwnershipIndexEntryState::EmptyVerified
+        return {JournalLoadState::Failed, std::nullopt,
+            "owner-index.fji entry state is " +
+            std::string(indexed_state == 0 ? "Pending" : "Owned") + " (expected EmptyVerified)."};
+    }
+
+    // 2. Locate and verify identity .fjn journal tombstone
+    std::wstring jpath;
+    if (!journal_path(root, identity, jpath, error)) {
+        return {JournalLoadState::Failed, std::nullopt, "Could not derive journal path: " + error};
+    }
+    HANDLE jfile = CreateFileW(jpath.c_str(), GENERIC_READ | READ_CONTROL, FILE_SHARE_READ, nullptr,
+        OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (jfile == INVALID_HANDLE_VALUE) {
+        const DWORD native_error = GetLastError();
+        if (native_error == ERROR_FILE_NOT_FOUND || native_error == ERROR_PATH_NOT_FOUND) {
+            return {JournalLoadState::Missing, std::nullopt, "Ownership journal (.fjn) does not exist."};
+        }
+        if (native_error == ERROR_ACCESS_DENIED) {
+            return {JournalLoadState::AccessDenied, std::nullopt, win32_error(native_error)};
+        }
+        return {JournalLoadState::Failed, std::nullopt, win32_error(native_error)};
+    }
+    ScopedHandle scoped_jfile(jfile);
+    if (!validate_private_acl_handle(scoped_jfile.get(), wide_user_sid, acl_error, acl_native_error)) {
+        const auto state = acl_native_error == ERROR_ACCESS_DENIED ? JournalLoadState::AccessDenied :
+            acl_native_error == ERROR_SUCCESS ? JournalLoadState::Corrupt : JournalLoadState::Failed;
+        return {state, std::nullopt, "Ownership journal (.fjn) security validation failed: " + acl_error};
+    }
+    LARGE_INTEGER jsize{};
+    if (GetFileSizeEx(scoped_jfile.get(), &jsize) == 0) {
+        return {JournalLoadState::Failed, std::nullopt, win32_error(GetLastError())};
+    }
+    if (jsize.QuadPart < 0 || jsize.QuadPart > maximum_journal_size) {
+        return {JournalLoadState::Corrupt, std::nullopt, "Ownership journal size is out of bounds."};
+    }
+    std::vector<std::byte> jbytes(static_cast<std::size_t>(jsize.QuadPart));
+    DWORD jread{};
+    if (!jbytes.empty() && (ReadFile(scoped_jfile.get(), jbytes.data(),
+            static_cast<DWORD>(jbytes.size()), &jread, nullptr) == 0 || jread != jbytes.size())) {
+        return {JournalLoadState::Failed, std::nullopt, win32_error(GetLastError())};
+    }
+
+    JournalRecord record;
+    JournalLoadState failure{};
+    if (!decode_record(jbytes, record, failure, error)) {
+        return {failure, std::nullopt, "Journal record decoding failed: " + error};
+    }
+    if (!record.empty_tombstone) {
+        return {JournalLoadState::Failed, record.metadata,
+            "Journal record is active (kind=1), not an empty tombstone."};
+    }
+    if (record.metadata.identity.user_sid != identity.user_sid) {
+        return {JournalLoadState::IdentityMismatch, record.metadata,
+            "Journal record user SID does not match requested identity."};
+    }
+    if (record.metadata.identity.canonical_avd_location != identity.canonical_avd_location) {
+        return {JournalLoadState::IdentityMismatch, record.metadata,
+            "Journal record canonical location does not match requested identity."};
+    }
+    if (record.metadata.generation_id != expected_generation) {
+        return {JournalLoadState::Stale, record.metadata,
+            "Journal record generation is stale or mismatched (" + record.metadata.generation_id +
+            " != " + std::string(expected_generation) + ")."};
+    }
+    if (record.metadata.owner_generation_id != store_owner_generation) {
+        return {JournalLoadState::Corrupt, record.metadata,
+            "Journal record owner generation does not match owner-index owner generation."};
+    }
+    if (record.metadata.phase != RuntimeLaunchPhase::StopRequested &&
+        record.metadata.phase != RuntimeLaunchPhase::JobCreated) {
+        return {JournalLoadState::Corrupt, record.metadata,
+            "Journal tombstone has invalid launch phase."};
+    }
+
+    return {JournalLoadState::VerifiedEmpty, std::move(record.metadata),
+        "owner-index[EmptyVerified], journal-tombstone[kind=0]", EmptyOwnershipEvidence::None};
+}
+
+bool NativeOwnershipJournal::check_durable_initially_clean(
+    const CanonicalAvdIdentity& identity,
+    std::string& detail,
+    const std::wstring& storage_root) {
+    detail.clear();
+    if (!identity.valid()) {
+        detail = "Canonical identity is invalid.";
+        return false;
+    }
+    std::string error;
+    std::wstring root;
+    if (!select_storage_root(storage_root, root, error)) {
+        detail = std::move(error);
+        return false;
+    }
+    const DWORD root_attr = GetFileAttributesW(root.c_str());
+    if (root_attr == INVALID_FILE_ATTRIBUTES) {
+        const DWORD native_error = GetLastError();
+        if (native_error == ERROR_FILE_NOT_FOUND || native_error == ERROR_PATH_NOT_FOUND) {
+            detail = "Ownership storage directory does not exist (clean first run).";
+            return true;
+        }
+        if (native_error == ERROR_ACCESS_DENIED) {
+            detail = "Ownership storage directory access denied: " + win32_error(native_error);
+            return false;
+        }
+        detail = "Could not inspect ownership storage directory: " + win32_error(native_error);
+        return false;
+    }
+    if ((root_attr & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        detail = "Ownership storage path is not a directory.";
+        return false;
+    }
+    if ((root_attr & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        detail = "Ownership storage directory may not be a reparse point.";
+        return false;
+    }
+
+    const std::wstring wide_user_sid(identity.user_sid.begin(), identity.user_sid.end());
+
+    // 1. Inspect owner-index.fji if it exists
+    const auto store_path = owner_store_path(root);
+    HANDLE store_handle = CreateFileW(store_path.c_str(), GENERIC_READ | READ_CONTROL,
+        FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    bool store_exists = false;
+    bool store_entry_found = false;
+    std::string store_entry_gen;
+    std::uint8_t store_entry_state = 0;
+    std::string store_owner_gen;
+
+    if (store_handle == INVALID_HANDLE_VALUE) {
+        const DWORD err = GetLastError();
+        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+            store_exists = false;
+        } else if (err == ERROR_ACCESS_DENIED) {
+            detail = "Access denied opening authority index: " + win32_error(err);
+            return false;
+        } else {
+            detail = "Could not open authority index: " + win32_error(err);
+            return false;
+        }
+    } else {
+        store_exists = true;
+        ScopedHandle scoped_store(store_handle);
+        std::string acl_error;
+        DWORD acl_native_error = ERROR_SUCCESS;
+        if (!validate_private_acl_handle(scoped_store.get(), wide_user_sid, acl_error, acl_native_error)) {
+            detail = "Authority index security validation failed: " + acl_error;
+            return false;
+        }
+        LARGE_INTEGER store_size{};
+        if (GetFileSizeEx(scoped_store.get(), &store_size) == 0) {
+            detail = "Could not inspect authority index size: " + win32_error(GetLastError());
+            return false;
+        }
+        if (store_size.QuadPart < 10) {
+            detail = "Authority index is truncated (size < 10 bytes).";
+            return false;
+        }
+        if (store_size.QuadPart > maximum_journal_size) {
+            detail = "Authority index size exceeds maximum allowed bound.";
+            return false;
+        }
+        std::vector<std::byte> bytes(static_cast<std::size_t>(store_size.QuadPart));
+        DWORD read{};
+        if (ReadFile(scoped_store.get(), bytes.data(), static_cast<DWORD>(bytes.size()),
+                &read, nullptr) == 0 || read != bytes.size()) {
+            detail = "Could not read authority index bytes.";
+            return false;
+        }
+        if (!std::equal(store_magic.begin(), store_magic.end(), bytes.begin())) {
+            detail = "Authority index header magic is corrupt or invalid.";
+            return false;
+        }
+        std::size_t offset = store_magic.size();
+        std::uint16_t version{};
+        if (!take_u16(bytes, offset, version) || version != 1) {
+            detail = "Authority index schema version is invalid or unsupported: " + std::to_string(version);
+            return false;
+        }
+        if (!take_text(bytes, offset, store_owner_gen)) {
+            detail = "Authority index owner generation is malformed.";
+            return false;
+        }
+        std::uint32_t count{};
+        if (!take_u32(bytes, offset, count) || count > 4096) {
+            detail = "Authority index entry count is invalid or exceeds limit.";
+            return false;
+        }
+        std::vector<std::string> seen_locations;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            std::string entry_sid;
+            std::string entry_loc;
+            std::string entry_gen;
+            if (!take_text(bytes, offset, entry_sid) ||
+                !take_text(bytes, offset, entry_loc) ||
+                !take_text(bytes, offset, entry_gen) ||
+                offset >= bytes.size()) {
+                detail = "Authority index entry framing is corrupt or truncated.";
+                return false;
+            }
+            const std::uint8_t state_byte = std::to_integer<std::uint8_t>(bytes[offset++]);
+            if (state_byte > 2) {
+                detail = "Authority index entry state is invalid (" + std::to_string(state_byte) + ").";
+                return false;
+            }
+            if (std::find(seen_locations.begin(), seen_locations.end(), entry_loc) != seen_locations.end()) {
+                detail = "Authority index contains duplicate records for AVD location: " + entry_loc;
+                return false;
+            }
+            seen_locations.push_back(entry_loc);
+
+            if (entry_loc == identity.canonical_avd_location) {
+                if (entry_sid != identity.user_sid) {
+                    detail = "Authority index contains record for canonical AVD owned by different SID: " + entry_sid;
+                    return false;
+                }
+                if (state_byte != 2) { // 0=Pending, 1=Owned
+                    detail = "owner-index contains unfinalized generation " + entry_gen +
+                        " in state " + (state_byte == 0 ? "Pending" : "Owned");
+                    return false;
+                }
+                store_entry_found = true;
+                store_entry_gen = std::move(entry_gen);
+                store_entry_state = state_byte;
+            }
+        }
+        if (offset != bytes.size()) {
+            detail = "Authority index has trailing data after records.";
+            return false;
+        }
+    }
+
+    // 2. Inspect identity .fjn if it exists
+    std::wstring jpath;
+    if (!journal_path(root, identity, jpath, error)) {
+        detail = "Could not derive journal path: " + error;
+        return false;
+    }
+    HANDLE jfile = CreateFileW(jpath.c_str(), GENERIC_READ | READ_CONTROL, FILE_SHARE_READ, nullptr,
+        OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    bool jfile_exists = false;
+    if (jfile == INVALID_HANDLE_VALUE) {
+        const DWORD err = GetLastError();
+        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+            jfile_exists = false;
+        } else if (err == ERROR_ACCESS_DENIED) {
+            detail = "Access denied opening canonical journal file: " + win32_error(err);
+            return false;
+        } else {
+            detail = "Could not open canonical journal file: " + win32_error(err);
+            return false;
+        }
+    } else {
+        jfile_exists = true;
+        ScopedHandle scoped_j(jfile);
+        std::string acl_error;
+        DWORD acl_native_error = ERROR_SUCCESS;
+        if (!validate_private_acl_handle(scoped_j.get(), wide_user_sid, acl_error, acl_native_error)) {
+            detail = "Canonical journal security validation failed: " + acl_error;
+            return false;
+        }
+        LARGE_INTEGER jsize{};
+        if (GetFileSizeEx(scoped_j.get(), &jsize) == 0) {
+            detail = "Could not inspect canonical journal size: " + win32_error(GetLastError());
+            return false;
+        }
+        if (jsize.QuadPart <= 0 || jsize.QuadPart > maximum_journal_size) {
+            detail = "Canonical journal size is out of bounds or empty.";
+            return false;
+        }
+        std::vector<std::byte> jbytes(static_cast<std::size_t>(jsize.QuadPart));
+        DWORD jread{};
+        if (!jbytes.empty() && (ReadFile(scoped_j.get(), jbytes.data(),
+                static_cast<DWORD>(jbytes.size()), &jread, nullptr) == 0 || jread != jbytes.size())) {
+            detail = "Could not read canonical journal bytes.";
+            return false;
+        }
+        JournalRecord record;
+        JournalLoadState failure{};
+        if (!decode_record(jbytes, record, failure, error)) {
+            detail = "Canonical journal record is corrupt or malformed: " + error;
+            return false;
+        }
+        if (!record.empty_tombstone) {
+            detail = "ownership journal contains active record (phase=" +
+                std::to_string(static_cast<int>(record.metadata.phase)) +
+                ", gen=" + record.metadata.generation_id + ")";
+            return false;
+        }
+        if (record.metadata.identity.user_sid != identity.user_sid ||
+            record.metadata.identity.canonical_avd_location != identity.canonical_avd_location) {
+            detail = "Canonical journal identity does not match expected canonical identity.";
+            return false;
+        }
+        if (store_entry_found) {
+            if (record.metadata.generation_id != store_entry_gen) {
+                detail = "owner-index and canonical journal conflict: index generation is " +
+                    store_entry_gen + ", journal generation is " + record.metadata.generation_id;
+                return false;
+            }
+            if (record.metadata.owner_generation_id != store_owner_gen) {
+                detail = "owner-index and canonical journal conflict on owner generation: index=" +
+                    store_owner_gen + ", journal=" + record.metadata.owner_generation_id;
+                return false;
+            }
+        }
+    }
+
+    if (store_entry_found && !jfile_exists) {
+        detail = "owner-index contains tombstone entry for canonical AVD, but .fjn journal file is missing.";
+        return false;
+    }
+    if (jfile_exists && (!store_exists || !store_entry_found)) {
+        detail = !store_exists
+            ? "Canonical journal exists, but owner-index.fji is missing."
+            : "Canonical journal exists, but owner-index has no entry for canonical AVD.";
+        return false;
+    }
+
+    if (!store_exists && !jfile_exists) {
+        detail = "Ownership storage contains no index or journal (clean first run).";
+        return true;
+    }
+
+    detail = "No active or pending generation found for this canonical identity.";
+    return true;
 }
 
 }

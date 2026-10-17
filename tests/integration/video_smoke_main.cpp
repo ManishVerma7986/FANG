@@ -119,6 +119,7 @@ int wmain(int argc, wchar_t* argv[]) {
     bool cleanup_completed = false;
     PostLaunchCleanupResult cleanup_result{};
     std::string user_sid;
+    std::string launched_generation_id;
     std::optional<CanonicalAvdIdentity> canonical_id;
     std::unique_ptr<SupervisorRuntimeClient> client;
     const std::wstring wide_mapping = L"Local\\" + std::wstring(report.expected_mapping.begin(), report.expected_mapping.end());
@@ -128,17 +129,36 @@ int wmain(int argc, wchar_t* argv[]) {
         cleanup_completed = true;
         std::cout << "\n>>> Executing unified supervisor-managed cleanup...\n";
         try {
+            if (launched_generation_id.empty() && client) {
+                const auto snapshot_gen = client->snapshot().runtime.generation_id;
+                if (!snapshot_gen.empty()) {
+                    launched_generation_id = snapshot_gen;
+                    if (report.generation_id.empty()) {
+                        report.generation_id = snapshot_gen;
+                    }
+                }
+            }
+            if (report.generation_id.empty()) {
+                report.unavailable_fields.push_back({
+                    "lifecycle_evidence.generation_id",
+                    "Runtime generation ID was not established before cleanup or observation."
+                });
+            }
             cleanup_result = execute_post_launch_cleanup(
                 [&] { return client ? client->shutdown() : false; },
                 [&] { return client ? client->snapshot() : fang::studio::SupervisorRuntimeSnapshot{}; },
                 [&]() -> fang::broker::JournalLoadResult {
-                    if (!user_sid.empty() && canonical_id.has_value()) {
-                        NativeOwnershipJournal verify_journal(user_sid, 0, 0, "");
-                        return verify_journal.load(*canonical_id);
+                    if (!user_sid.empty() && canonical_id.has_value() && !launched_generation_id.empty()) {
+                        return NativeOwnershipJournal::verify_durable_finalized(
+                            *canonical_id, launched_generation_id);
                     }
                     fang::broker::JournalLoadResult r{};
                     r.state = fang::broker::JournalLoadState::Failed;
-                    r.error = "User SID or canonical identity unavailable";
+                    if (launched_generation_id.empty()) {
+                        r.error = "Runtime generation ID was not established before cleanup";
+                    } else {
+                        r.error = "User SID or canonical identity unavailable";
+                    }
                     return r;
                 },
                 wide_mapping,
@@ -245,17 +265,14 @@ int wmain(int argc, wchar_t* argv[]) {
 
         user_sid = current_user.identity.sid;
         canonical_id = CanonicalAvdIdentity{user_sid, ref_config->canonical_avd_location};
-        NativeOwnershipJournal initial_journal(user_sid, 0, 0, "");
-        const auto initial_journal_load = initial_journal.load(*canonical_id);
-        if (initial_journal_load.state == JournalLoadState::Record ||
-            initial_journal_load.state == JournalLoadState::Stale) {
+        std::string initial_journal_detail;
+        if (!NativeOwnershipJournal::check_durable_initially_clean(*canonical_id, initial_journal_detail)) {
             const auto preflight_ms = static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - preflight_start).count());
             print_stage_line({"preflight_prerequisites", SmokeStageStatus::Blocked, preflight_ms,
-                "Ownership journal already contains unfinalized record: " +
-                (initial_journal_load.record.has_value() ? initial_journal_load.record->generation_id : initial_journal_load.error)});
+                "Ownership journal already contains unfinalized record: " + initial_journal_detail});
             report.outcome = "BLOCKED";
-            report.failure_reason = "Ownership journal contains an unfinalized record.";
+            report.failure_reason = "Ownership journal contains an unfinalized record: " + initial_journal_detail;
             save_report("preflight journal check");
             return 3;
         }
@@ -303,6 +320,10 @@ int wmain(int argc, wchar_t* argv[]) {
 
         // Stage 3: Wait for Supervisor Ready and guest_ready
         const auto readiness = wait_for_readiness([&] { return client->snapshot(); }, config.readiness_timeout_ms);
+        report.generation_id = readiness.generation_id;
+        if (!readiness.generation_id.empty()) {
+            launched_generation_id = readiness.generation_id;
+        }
         report.owned_process_id = readiness.process_id;
         report.process_creation_time = readiness.process_creation_time;
         report.containment_verified = readiness.containment_verified;

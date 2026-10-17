@@ -1,13 +1,19 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
+#include <aclapi.h>
+#include <sddl.h>
 
 #include "video_smoke_runner.hpp"
 #include "video_transport.hpp"
 #include "video_frame.hpp"
+#include "broker_native_journal.hpp"
+#include "broker_native_job.hpp"
+#include "broker_pipe.hpp"
 
 #include <cassert>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <filesystem>
 #include <memory>
@@ -1142,6 +1148,638 @@ void test_non_standard_exception_cleanup_handling() {
     }
 }
 
+void test_append_u16(std::vector<std::byte>& out, std::uint16_t v) {
+    out.push_back(static_cast<std::byte>(v & 0xff));
+    out.push_back(static_cast<std::byte>((v >> 8) & 0xff));
+}
+
+void test_append_u32(std::vector<std::byte>& out, std::uint32_t v) {
+    for (int i = 0; i < 4; ++i) out.push_back(static_cast<std::byte>((v >> (i * 8)) & 0xff));
+}
+
+void test_append_u64(std::vector<std::byte>& out, std::uint64_t v) {
+    for (int i = 0; i < 8; ++i) out.push_back(static_cast<std::byte>((v >> (i * 8)) & 0xff));
+}
+
+void test_append_str(std::vector<std::byte>& out, std::string_view s) {
+    test_append_u32(out, static_cast<std::uint32_t>(s.size()));
+    for (char c : s) out.push_back(static_cast<std::byte>(c));
+}
+
+class ScopedTestJournalDir {
+public:
+    ScopedTestJournalDir() {
+        const auto temp_base = std::filesystem::temp_directory_path();
+        dir_ = temp_base / ("fang_test_journal_" + std::to_string(::GetCurrentProcessId()) + "_" +
+                            std::to_string(::GetTickCount64()) + "_" + std::to_string(counter_++));
+        std::error_code ec;
+        std::filesystem::create_directories(dir_, ec);
+    }
+
+    ~ScopedTestJournalDir() {
+        std::error_code ec;
+        std::filesystem::remove_all(dir_, ec);
+    }
+
+    const std::filesystem::path& path() const noexcept { return dir_; }
+    std::wstring wpath() const { return dir_.wstring(); }
+
+private:
+    std::filesystem::path dir_;
+    static inline std::uint32_t counter_ = 1;
+};
+
+struct TestOwnerIndexEntry {
+    std::string user_sid;
+    std::string canonical_avd;
+    std::string generation_id;
+    std::uint8_t state; // 0=Pending, 1=Owned, 2=EmptyVerified
+};
+
+bool restrict_test_file_to_system(const std::wstring& path) {
+    const std::wstring sddl = L"D:P(A;;FA;;;SY)";
+    PSECURITY_DESCRIPTOR descriptor{};
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(),
+            SDDL_REVISION_1, &descriptor, nullptr) == 0) {
+        return false;
+    }
+    BOOL dacl_present = FALSE;
+    BOOL dacl_defaulted = FALSE;
+    PACL dacl = nullptr;
+    GetSecurityDescriptorDacl(descriptor, &dacl_present, &dacl, &dacl_defaulted);
+    const DWORD result = SetNamedSecurityInfoW(
+        const_cast<LPWSTR>(path.c_str()),
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr, nullptr, dacl, nullptr);
+    LocalFree(descriptor);
+    return result == ERROR_SUCCESS;
+}
+
+bool restore_test_file_access(const std::wstring& path, const std::string& user_sid) {
+    std::string err;
+    return fang::broker::NativeOwnershipJournal::apply_private_acl(path, user_sid, err);
+}
+
+void write_test_owner_index_file(const std::filesystem::path& dir,
+                                 std::string_view owner_gen,
+                                 const std::vector<TestOwnerIndexEntry>& entries,
+                                 std::string_view custom_magic = "FIDX",
+                                 std::uint16_t version = 1,
+                                 bool apply_acl = true,
+                                 std::string_view override_acl_sid = {}) {
+    std::vector<std::byte> buf;
+    for (char c : custom_magic) buf.push_back(static_cast<std::byte>(c));
+    test_append_u16(buf, version);
+    test_append_str(buf, owner_gen);
+    test_append_u32(buf, static_cast<std::uint32_t>(entries.size()));
+    for (const auto& e : entries) {
+        test_append_str(buf, e.user_sid);
+        test_append_str(buf, e.canonical_avd);
+        test_append_str(buf, e.generation_id);
+        buf.push_back(static_cast<std::byte>(e.state));
+    }
+    const auto file_path = dir / "owner-index.fji";
+    std::ofstream ofs(file_path, std::ios::binary);
+    ofs.write(reinterpret_cast<const char*>(buf.data()), buf.size());
+    ofs.close();
+
+    if (apply_acl) {
+        const std::string sid = !override_acl_sid.empty()
+            ? std::string(override_acl_sid)
+            : (!entries.empty() ? entries[0].user_sid : fang::broker::current_user_identity().identity.sid);
+        std::string err;
+        fang::broker::NativeOwnershipJournal::apply_private_acl(file_path.wstring(), sid, err);
+    }
+}
+
+void write_test_journal_file(const std::wstring& jpath,
+                             bool empty_tombstone,
+                             std::uint8_t phase,
+                             std::uint32_t owner_pid,
+                             const fang::broker::CanonicalAvdIdentity& identity,
+                             std::string_view gen,
+                             std::string_view owner_gen,
+                             std::string_view custom_magic = "FJRN",
+                             std::uint16_t version = 1,
+                             bool apply_acl = true,
+                             std::string_view override_acl_sid = {}) {
+    std::filesystem::path p(jpath);
+    if (p.has_parent_path()) {
+        std::error_code ec;
+        std::filesystem::create_directories(p.parent_path(), ec);
+    }
+    std::vector<std::byte> buf;
+    for (char c : custom_magic) buf.push_back(static_cast<std::byte>(c));
+    test_append_u16(buf, version);
+    buf.push_back(empty_tombstone ? std::byte{0} : std::byte{1});
+    buf.push_back(static_cast<std::byte>(phase));
+    test_append_u32(buf, 1); // session_id
+    test_append_u32(buf, owner_pid);
+    test_append_u32(buf, 0); // root_pid
+    test_append_u64(buf, 0); // root_creation_time
+    test_append_str(buf, identity.user_sid);
+    test_append_str(buf, identity.canonical_avd_location);
+    test_append_str(buf, gen);
+    test_append_str(buf, owner_gen);
+
+    std::wstring job_name_w;
+    std::string err;
+    fang::broker::expected_job_object_name(identity, gen, job_name_w, err);
+    std::string job_name;
+    job_name.reserve(job_name_w.size());
+    for (const wchar_t wc : job_name_w) job_name.push_back(static_cast<char>(wc & 0x7f));
+    test_append_str(buf, job_name);
+
+    std::ofstream ofs(jpath, std::ios::binary);
+    ofs.write(reinterpret_cast<const char*>(buf.data()), buf.size());
+    ofs.close();
+
+    if (apply_acl) {
+        const std::string sid = !override_acl_sid.empty()
+            ? std::string(override_acl_sid)
+            : (!identity.user_sid.empty() ? identity.user_sid : fang::broker::current_user_identity().identity.sid);
+        std::string acl_err;
+        fang::broker::NativeOwnershipJournal::apply_private_acl(jpath, sid, acl_err);
+    }
+}
+
+// 19. Test durable journal verification scenarios (Stage 2D.5.10 regression requirements)
+void test_durable_journal_verification_scenarios() {
+    std::cout << "Running test_durable_journal_verification_scenarios...\n";
+    std::string gen_err;
+    const std::string gen1 = fang::broker::create_runtime_generation_id(gen_err);
+    const std::string gen2 = fang::broker::create_runtime_generation_id(gen_err);
+    const std::string owner_gen1 = fang::broker::create_runtime_generation_id(gen_err);
+    require(!gen1.empty() && !gen2.empty() && !owner_gen1.empty(), "Generation IDs must be generated successfully.");
+
+    const std::string current_sid = fang::broker::current_user_identity().identity.sid;
+    require(!current_sid.empty(), "Current user SID must be available.");
+
+    const fang::broker::CanonicalAvdIdentity id1{current_sid, "C:/Users/test/.android/avd/Pixel_API_34.avd"};
+    const fang::broker::CanonicalAvdIdentity id2{current_sid, "C:/Users/test/.android/avd/Pixel_API_35.avd"};
+
+    // Scenario 1: Clean first-run state under documented initialization contract
+    {
+        std::string clean_detail;
+        // 1A: Non-existent directory is clean first run
+        require(fang::broker::NativeOwnershipJournal::check_durable_initially_clean(id1, clean_detail, L"C:\\non_existent_fang_dir_54321"),
+            "Non-existent directory must be considered clean first run.");
+        require(clean_detail.find("clean first run") != std::string::npos, "Detail must record clean first run.");
+
+        // 1B: Existing directory but missing index and journal is clean first run
+        ScopedTestJournalDir temp_dir_empty;
+        require(fang::broker::NativeOwnershipJournal::check_durable_initially_clean(id1, clean_detail, temp_dir_empty.wpath()),
+            "Empty directory with no files must be considered clean first run.");
+        require(clean_detail.find("clean first run") != std::string::npos, "Detail must record clean first run.");
+
+        // 1C: Existing directory with EmptyVerified tombstone is initially clean
+        ScopedTestJournalDir temp_dir_tombstone;
+        std::wstring jpath_t;
+        std::string jerr_t;
+        require(fang::broker::NativeOwnershipJournal::get_journal_path(temp_dir_tombstone.wpath(), id1, jpath_t, jerr_t), "jpath must derive.");
+        write_test_owner_index_file(temp_dir_tombstone.path(), owner_gen1, {
+            {id1.user_sid, id1.canonical_avd_location, gen1, 2 /* EmptyVerified */}
+        });
+        write_test_journal_file(jpath_t, true, 4, 1234, id1, gen1, owner_gen1);
+        require(fang::broker::NativeOwnershipJournal::check_durable_initially_clean(id1, clean_detail, temp_dir_tombstone.wpath()),
+            "EmptyVerified tombstone must be considered clean.");
+    }
+
+    // Scenario 2: Existing truncated index fails preflight and verification
+    {
+        ScopedTestJournalDir temp_dir_trunc;
+        const auto index_path = temp_dir_trunc.path() / "owner-index.fji";
+        // 2A: 0-byte truncated index
+        {
+            std::ofstream ofs(index_path, std::ios::binary);
+            ofs.close();
+            std::string acl_err;
+            fang::broker::NativeOwnershipJournal::apply_private_acl(index_path.wstring(), current_sid, acl_err);
+        }
+        std::string detail;
+        require(!fang::broker::NativeOwnershipJournal::check_durable_initially_clean(id1, detail, temp_dir_trunc.wpath()),
+            "0-byte index must fail preflight.");
+        require(detail.find("truncated") != std::string::npos, "Detail must mention truncated index.");
+
+        const auto res_zero = fang::broker::NativeOwnershipJournal::verify_durable_finalized(id1, gen1, temp_dir_trunc.wpath());
+        require(res_zero.state == fang::broker::JournalLoadState::Corrupt, "0-byte index must yield Corrupt.");
+
+        // 2B: 4-byte truncated index (< 10 bytes)
+        {
+            std::ofstream ofs(index_path, std::ios::binary);
+            ofs.write("FIDX", 4);
+            ofs.close();
+            std::string acl_err;
+            fang::broker::NativeOwnershipJournal::apply_private_acl(index_path.wstring(), current_sid, acl_err);
+        }
+        require(!fang::broker::NativeOwnershipJournal::check_durable_initially_clean(id1, detail, temp_dir_trunc.wpath()),
+            "4-byte index must fail preflight.");
+        require(detail.find("truncated") != std::string::npos, "Detail must mention truncated index.");
+
+        const auto res_four = fang::broker::NativeOwnershipJournal::verify_durable_finalized(id1, gen1, temp_dir_trunc.wpath());
+        require(res_four.state == fang::broker::JournalLoadState::Corrupt, "4-byte index must yield Corrupt.");
+    }
+
+    // Scenario 3: Existing corrupt index magic or unsupported schema
+    {
+        // 3A: Corrupt index magic ("BADX")
+        ScopedTestJournalDir temp_dir_bad_magic;
+        write_test_owner_index_file(temp_dir_bad_magic.path(), owner_gen1, {
+            {id1.user_sid, id1.canonical_avd_location, gen1, 2}
+        }, "BADX");
+        std::string detail;
+        require(!fang::broker::NativeOwnershipJournal::check_durable_initially_clean(id1, detail, temp_dir_bad_magic.wpath()),
+            "Bad index magic must fail preflight.");
+        require(detail.find("magic is corrupt or invalid") != std::string::npos, "Detail must mention bad magic.");
+
+        const auto res_bad_magic = fang::broker::NativeOwnershipJournal::verify_durable_finalized(id1, gen1, temp_dir_bad_magic.wpath());
+        require(res_bad_magic.state == fang::broker::JournalLoadState::Corrupt, "Bad index magic must yield Corrupt.");
+
+        // 3B: Unsupported schema version (version = 2)
+        ScopedTestJournalDir temp_dir_bad_ver;
+        write_test_owner_index_file(temp_dir_bad_ver.path(), owner_gen1, {
+            {id1.user_sid, id1.canonical_avd_location, gen1, 2}
+        }, "FIDX", 2 /* unsupported version */);
+        require(!fang::broker::NativeOwnershipJournal::check_durable_initially_clean(id1, detail, temp_dir_bad_ver.wpath()),
+            "Unsupported index schema version must fail preflight.");
+        require(detail.find("schema version is invalid or unsupported") != std::string::npos, "Detail must mention unsupported schema.");
+
+        const auto res_bad_ver = fang::broker::NativeOwnershipJournal::verify_durable_finalized(id1, gen1, temp_dir_bad_ver.wpath());
+        require(res_bad_ver.state == fang::broker::JournalLoadState::Unsupported, "Unsupported version must yield Unsupported.");
+
+        // 3C: Duplicate entries in owner-index
+        ScopedTestJournalDir temp_dir_dup;
+        write_test_owner_index_file(temp_dir_dup.path(), owner_gen1, {
+            {id1.user_sid, id1.canonical_avd_location, gen1, 2},
+            {id1.user_sid, id1.canonical_avd_location, gen1, 2}
+        });
+        require(!fang::broker::NativeOwnershipJournal::check_durable_initially_clean(id1, detail, temp_dir_dup.wpath()),
+            "Duplicate entry in index must fail preflight.");
+        require(detail.find("duplicate") != std::string::npos, "Detail must mention duplicate records.");
+
+        const auto res_dup = fang::broker::NativeOwnershipJournal::verify_durable_finalized(id1, gen1, temp_dir_dup.wpath());
+        require(res_dup.state == fang::broker::JournalLoadState::Corrupt, "Duplicate entry in index must yield Corrupt.");
+    }
+
+    // Scenario 4: Existing truncated or corrupt journal
+    {
+        ScopedTestJournalDir temp_dir;
+        std::wstring jpath;
+        std::string jerr;
+        require(fang::broker::NativeOwnershipJournal::get_journal_path(temp_dir.wpath(), id1, jpath, jerr), "jpath must derive.");
+
+        write_test_owner_index_file(temp_dir.path(), owner_gen1, {
+            {id1.user_sid, id1.canonical_avd_location, gen1, 2}
+        });
+
+        // 4A: Truncated journal (5 bytes)
+        {
+            std::ofstream ofs(jpath, std::ios::binary);
+            ofs.write("FJRN\0", 5);
+            ofs.close();
+            std::string acl_err;
+            fang::broker::NativeOwnershipJournal::apply_private_acl(jpath, current_sid, acl_err);
+        }
+        std::string detail;
+        require(!fang::broker::NativeOwnershipJournal::check_durable_initially_clean(id1, detail, temp_dir.wpath()),
+            "Truncated journal must fail preflight.");
+        require(detail.find("corrupt or malformed") != std::string::npos || detail.find("truncated") != std::string::npos,
+            "Detail must describe truncated journal.");
+
+        const auto res_trunc = fang::broker::NativeOwnershipJournal::verify_durable_finalized(id1, gen1, temp_dir.wpath());
+        require(res_trunc.state == fang::broker::JournalLoadState::Corrupt, "Truncated journal must yield Corrupt.");
+
+        // 4B: Corrupt journal magic ("BADJ")
+        write_test_journal_file(jpath, true, 4, 1234, id1, gen1, owner_gen1, "BADJ");
+        require(!fang::broker::NativeOwnershipJournal::check_durable_initially_clean(id1, detail, temp_dir.wpath()),
+            "Bad journal magic must fail preflight.");
+
+        const auto res_bad_jrn = fang::broker::NativeOwnershipJournal::verify_durable_finalized(id1, gen1, temp_dir.wpath());
+        require(res_bad_jrn.state == fang::broker::JournalLoadState::Corrupt, "Bad journal magic must yield Corrupt.");
+    }
+
+    // Scenario 5: Access-denied or other unreadable evidence
+    {
+        ScopedTestJournalDir temp_dir;
+        std::wstring jpath;
+        std::string jerr;
+        require(fang::broker::NativeOwnershipJournal::get_journal_path(temp_dir.wpath(), id1, jpath, jerr), "jpath must derive.");
+
+        write_test_owner_index_file(temp_dir.path(), owner_gen1, {
+            {id1.user_sid, id1.canonical_avd_location, gen1, 2}
+        });
+        write_test_journal_file(jpath, true, 4, 1234, id1, gen1, owner_gen1);
+
+        const auto index_path = (temp_dir.path() / "owner-index.fji").wstring();
+        // Restrict owner-index.fji to SYSTEM only (denies current user)
+        if (restrict_test_file_to_system(index_path)) {
+            std::string detail;
+            require(!fang::broker::NativeOwnershipJournal::check_durable_initially_clean(id1, detail, temp_dir.wpath()),
+                "Access-denied index must fail preflight.");
+            require(detail.find("access denied") != std::string::npos || detail.find("Access denied") != std::string::npos,
+                "Preflight detail must distinguish access denied.");
+
+            const auto res_ad = fang::broker::NativeOwnershipJournal::verify_durable_finalized(id1, gen1, temp_dir.wpath());
+            require(res_ad.state == fang::broker::JournalLoadState::AccessDenied,
+                "Access-denied index must yield AccessDenied.");
+
+            // Restore permissions so ScopedTestJournalDir cleanup succeeds
+            restore_test_file_access(index_path, current_sid);
+        }
+    }
+
+    // Scenario 6: Conflicting index and journal states
+    {
+        // 6A: Generation conflict (index gen1, journal gen2)
+        ScopedTestJournalDir temp_dir_a;
+        std::wstring jpath_a;
+        std::string jerr_a;
+        require(fang::broker::NativeOwnershipJournal::get_journal_path(temp_dir_a.wpath(), id1, jpath_a, jerr_a), "jpath must derive.");
+        write_test_owner_index_file(temp_dir_a.path(), owner_gen1, {
+            {id1.user_sid, id1.canonical_avd_location, gen1, 2}
+        });
+        write_test_journal_file(jpath_a, true, 4, 1234, id1, gen2, owner_gen1);
+
+        std::string detail;
+        require(!fang::broker::NativeOwnershipJournal::check_durable_initially_clean(id1, detail, temp_dir_a.wpath()),
+            "Conflicting generations must fail preflight.");
+        require(detail.find("conflict") != std::string::npos, "Detail must record conflict.");
+
+        const auto res_gen_mismatch = fang::broker::NativeOwnershipJournal::verify_durable_finalized(id1, gen1, temp_dir_a.wpath());
+        require(res_gen_mismatch.state == fang::broker::JournalLoadState::Stale ||
+                res_gen_mismatch.state == fang::broker::JournalLoadState::Corrupt,
+            "Conflicting generation must yield Stale or Corrupt.");
+
+        // 6B: State conflict (index Pending state 0, but journal tombstone)
+        ScopedTestJournalDir temp_dir_b;
+        std::wstring jpath_b;
+        std::string jerr_b;
+        require(fang::broker::NativeOwnershipJournal::get_journal_path(temp_dir_b.wpath(), id1, jpath_b, jerr_b), "jpath must derive.");
+        write_test_owner_index_file(temp_dir_b.path(), owner_gen1, {
+            {id1.user_sid, id1.canonical_avd_location, gen1, 0 /* Pending */}
+        });
+        write_test_journal_file(jpath_b, true, 4, 1234, id1, gen1, owner_gen1);
+
+        require(!fang::broker::NativeOwnershipJournal::check_durable_initially_clean(id1, detail, temp_dir_b.wpath()),
+            "Pending index state must fail preflight.");
+        require(detail.find("unfinalized") != std::string::npos || detail.find("Pending") != std::string::npos,
+            "Detail must mention unfinalized/Pending state.");
+
+        const auto res_pending = fang::broker::NativeOwnershipJournal::verify_durable_finalized(id1, gen1, temp_dir_b.wpath());
+        require(res_pending.state == fang::broker::JournalLoadState::Failed, "Pending index state must yield Failed.");
+
+        // 6C: Index has EmptyVerified entry, but .fjn file is missing
+        ScopedTestJournalDir temp_dir_c;
+        write_test_owner_index_file(temp_dir_c.path(), owner_gen1, {
+            {id1.user_sid, id1.canonical_avd_location, gen1, 2}
+        });
+        require(!fang::broker::NativeOwnershipJournal::check_durable_initially_clean(id1, detail, temp_dir_c.wpath()),
+            "Missing journal with index entry must fail preflight.");
+        require(detail.find("missing") != std::string::npos, "Detail must describe missing journal file.");
+
+        const auto res_no_jrn = fang::broker::NativeOwnershipJournal::verify_durable_finalized(id1, gen1, temp_dir_c.wpath());
+        require(res_no_jrn.state == fang::broker::JournalLoadState::Missing, "Missing journal file must yield Missing.");
+
+        // 6D: Journal file exists, but index has no entry for this AVD
+        ScopedTestJournalDir temp_dir_d;
+        std::wstring jpath_d;
+        std::string jerr_d;
+        require(fang::broker::NativeOwnershipJournal::get_journal_path(temp_dir_d.wpath(), id1, jpath_d, jerr_d), "jpath must derive.");
+        write_test_owner_index_file(temp_dir_d.path(), owner_gen1, {
+            {id2.user_sid, id2.canonical_avd_location, gen1, 2}
+        });
+        write_test_journal_file(jpath_d, true, 4, 1234, id1, gen1, owner_gen1);
+        require(!fang::broker::NativeOwnershipJournal::check_durable_initially_clean(id1, detail, temp_dir_d.wpath()),
+            "Journal without index entry must fail preflight.");
+        require(detail.find("no entry") != std::string::npos, "Detail must describe index missing entry.");
+
+        const auto res_missing_index_entry = fang::broker::NativeOwnershipJournal::verify_durable_finalized(id1, gen1, temp_dir_d.wpath());
+        require(res_missing_index_entry.state == fang::broker::JournalLoadState::Missing,
+            "Index lacking entry for this AVD must yield Missing.");
+
+        // 6E: Missing index entirely, orphan canonical journal file exists (Stage 2D.5.12 Case A)
+        ScopedTestJournalDir temp_dir_e;
+        std::wstring jpath_e;
+        std::string jerr_e;
+        require(fang::broker::NativeOwnershipJournal::get_journal_path(temp_dir_e.wpath(), id1, jpath_e, jerr_e), "jpath must derive.");
+        const auto index_path_e = temp_dir_e.path() / "owner-index.fji";
+        require(!std::filesystem::exists(index_path_e), "owner-index.fji must be genuinely absent for Case A.");
+        write_test_journal_file(jpath_e, true, 4, 1234, id1, gen1, owner_gen1);
+        require(std::filesystem::exists(jpath_e), "Canonical journal must exist for Case A.");
+
+        std::string detail_e;
+        require(!fang::broker::NativeOwnershipJournal::check_durable_initially_clean(id1, detail_e, temp_dir_e.wpath()),
+            "Orphan journal without owner-index.fji must fail preflight.");
+        require(detail_e.find("owner-index.fji is missing") != std::string::npos,
+            "Diagnostic must identify that owner-index.fji is missing.");
+
+        const auto res_orphan_jrn = fang::broker::NativeOwnershipJournal::verify_durable_finalized(id1, gen1, temp_dir_e.wpath());
+        require(res_orphan_jrn.state == fang::broker::JournalLoadState::Missing,
+            "Missing index file must yield Missing state.");
+        require(!std::filesystem::exists(index_path_e), "owner-index.fji must remain absent after checks.");
+    }
+
+    // Scenario 7: Reparse-point rejection for index and journal paths
+    {
+        // Check handle validation directly: validate_private_acl_handle rejects FILE_ATTRIBUTE_REPARSE_POINT
+        // We verify that root directory reparse points are also rejected.
+        ScopedTestJournalDir temp_dir_target;
+        const auto link_dir = temp_dir_target.path().parent_path() /
+            ("fang_test_link_" + std::to_string(::GetCurrentProcessId()) + "_" + std::to_string(::GetTickCount64()));
+        // Attempt unprivileged junction creation
+        if (CreateSymbolicLinkW(link_dir.c_str(), temp_dir_target.path().c_str(),
+                SYMBOLIC_LINK_FLAG_DIRECTORY | 0x2 /* SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE */) != 0) {
+            std::string detail;
+            require(!fang::broker::NativeOwnershipJournal::check_durable_initially_clean(id1, detail, link_dir.wstring()),
+                "Reparse point directory must fail preflight.");
+            require(detail.find("reparse point") != std::string::npos, "Detail must report reparse point.");
+
+            const auto res_reparse = fang::broker::NativeOwnershipJournal::verify_durable_finalized(id1, gen1, link_dir.wstring());
+            require(res_reparse.state == fang::broker::JournalLoadState::Corrupt,
+                "Reparse point directory must yield Corrupt.");
+            RemoveDirectoryW(link_dir.c_str());
+        }
+    }
+
+    // Scenario 8: Exact matching finalized generation succeeds
+    {
+        ScopedTestJournalDir temp_dir;
+        std::wstring jpath;
+        std::string jerr;
+        require(fang::broker::NativeOwnershipJournal::get_journal_path(temp_dir.wpath(), id1, jpath, jerr),
+            "Journal path derivation must succeed.");
+
+        write_test_owner_index_file(temp_dir.path(), owner_gen1, {
+            {id1.user_sid, id1.canonical_avd_location, gen1, 2 /* EmptyVerified */}
+        });
+        write_test_journal_file(jpath, true /* empty_tombstone */, 4 /* StopRequested */, 1234, id1, gen1, owner_gen1);
+
+        const auto res = fang::broker::NativeOwnershipJournal::verify_durable_finalized(id1, gen1, temp_dir.wpath());
+        require(res.state == fang::broker::JournalLoadState::VerifiedEmpty,
+            "Valid EmptyVerified tombstone must yield VerifiedEmpty.");
+        require(res.record.has_value() && res.record->generation_id == gen1,
+            "Loaded metadata must match exact generation.");
+
+        std::uint64_t sim_time = 0;
+        auto cleanup = execute_post_launch_cleanup(
+            [&] { return true; },
+            [&] {
+                fang::studio::SupervisorRuntimeSnapshot snap{};
+                snap.runtime.state = fang::broker::RuntimeLifecycleState::Stopped;
+                return snap;
+            },
+            [&] { return fang::broker::NativeOwnershipJournal::verify_durable_finalized(id1, gen1, temp_dir.wpath()); },
+            L"Local\\fake_shm_valid",
+            99999999,
+            12345,
+            1000,
+            nullptr,
+            [](const std::wstring&) { return true; },
+            [&] { return sim_time; },
+            [&](std::uint32_t step) { sim_time += step; }
+        );
+        require(cleanup.containment_empty_verified, "Containment empty must be verified for valid journal.");
+        require(cleanup.journal_final_state == "EmptyVerified", "Journal final state must be EmptyVerified.");
+        require(cleanup.cleanup_fully_verified, "Overall cleanup must be verified.");
+    }
+
+    // Scenario 9: Generation unavailable during cleanup never reports EmptyVerified
+    {
+        std::uint64_t sim_time = 0;
+        auto cleanup = execute_post_launch_cleanup(
+            [&] { return true; },
+            [&] {
+                fang::studio::SupervisorRuntimeSnapshot snap{};
+                snap.runtime.state = fang::broker::RuntimeLifecycleState::Stopped;
+                return snap;
+            },
+            [&] {
+                fang::broker::JournalLoadResult j{};
+                j.state = fang::broker::JournalLoadState::Failed;
+                j.error = "Runtime generation ID was not established before cleanup";
+                return j;
+            },
+            L"Local\\fake_shm_no_gen",
+            99999999,
+            12345,
+            1000,
+            nullptr,
+            [](const std::wstring&) { return true; },
+            [&] { return sim_time; },
+            [&](std::uint32_t step) { sim_time += step; }
+        );
+
+        require(!cleanup.containment_empty_verified, "Containment empty must NOT be reported when generation is empty.");
+        require(cleanup.journal_final_state != "EmptyVerified", "Final state must not be EmptyVerified.");
+
+        VideoSmokeReport report{};
+        report.run_id = generate_run_uuid();
+        report.run_timestamp = current_iso8601_timestamp();
+        report.generation_id = "";
+        apply_cleanup_result_to_report(cleanup, report);
+
+        const auto json = format_json_report(report);
+        require(json.find("\"generation_id\": null") != std::string::npos, "Empty generation must serialize as null.");
+        std::string err;
+        require(validate_report_schema(json, err), "Schema validation must pass with null generation_id.");
+    }
+
+    // Scenario 10: Generation recovery synchronized with report serialization
+    {
+        VideoSmokeReport report{};
+        report.run_id = generate_run_uuid();
+        report.run_timestamp = current_iso8601_timestamp();
+        report.generation_id = ""; // Initially empty from readiness
+
+        // Simulate recovery from snapshot
+        const std::string recovered_gen = gen1;
+        report.generation_id = recovered_gen;
+
+        const auto json = format_json_report(report);
+        require(json.find("\"generation_id\": \"" + recovered_gen + "\"") != std::string::npos,
+            "Recovered generation must serialize into report JSON.");
+
+        // And if generation cannot be established:
+        VideoSmokeReport report_unavail{};
+        report_unavail.run_id = generate_run_uuid();
+        report_unavail.run_timestamp = current_iso8601_timestamp();
+        report_unavail.generation_id = "";
+        report_unavail.unavailable_fields.push_back({
+            "lifecycle_evidence.generation_id",
+            "Runtime generation ID was not established before cleanup or observation."
+        });
+        const auto json_unavail = format_json_report(report_unavail);
+        require(json_unavail.find("\"generation_id\": null") != std::string::npos,
+            "Unavailable generation must be null.");
+        require(json_unavail.find("lifecycle_evidence.generation_id") != std::string::npos,
+            "Unavailable fields list must record generation_id.");
+    }
+
+    // Scenario 11: Generation discontinuity during readiness polling
+    {
+        std::uint64_t simulated_time = 0;
+        int poll_count = 0;
+        fang::studio::SupervisorRuntimeSnapshot mock_snapshot{};
+        mock_snapshot.runtime.state = fang::broker::RuntimeLifecycleState::GuestBooting;
+        mock_snapshot.runtime.guest_ready = false;
+        mock_snapshot.runtime.process_id = 12345;
+
+        const auto result = wait_for_readiness(
+            [&] {
+                poll_count++;
+                if (poll_count == 1) {
+                    mock_snapshot.runtime.generation_id = gen1;
+                } else {
+                    mock_snapshot.runtime.generation_id = gen2; // Discontinuity!
+                }
+                return mock_snapshot;
+            },
+            5000,
+            [&] { return simulated_time; },
+            [&](std::uint32_t step) { simulated_time += step; }
+        );
+
+        require(!result.succeeded, "Readiness wait must fail on generation discontinuity.");
+        require(result.error.find("generation discontinuity detected") != std::string::npos,
+            "Error diagnostic must capture generation discontinuity.");
+        require(result.error.find(gen1) != std::string::npos && result.error.find(gen2) != std::string::npos,
+            "Error diagnostic must name expected and observed generations.");
+    }
+
+    // Scenario 12: Primary failure preservation when cleanup verification fails
+    {
+        VideoSmokeReport report{};
+        report.run_id = generate_run_uuid();
+        report.run_timestamp = current_iso8601_timestamp();
+        report.outcome = "FAIL — frame counter discontinuity detected";
+        report.failure_reason = "Frame sequence skipped from 42 to 99";
+
+        PostLaunchCleanupResult cleanup{};
+        cleanup.shutdown_requested = true;
+        cleanup.shutdown_succeeded = true;
+        cleanup.containment_empty_verified = false;
+        cleanup.cleanup_fully_verified = false;
+        cleanup.failure_reason = "Journal verification failed: Corrupt magic in owner-index.fji";
+
+        apply_cleanup_result_to_report(cleanup, report);
+
+        require(report.outcome.find("FAIL — frame counter discontinuity detected") != std::string::npos,
+            "Primary outcome must remain visible in report outcome.");
+        require(report.failure_reason == "Frame sequence skipped from 42 to 99",
+            "Primary failure reason must NOT be overwritten by cleanup failure.");
+        require(!report.cleanup_verified, "cleanup_verified must be false.");
+        require(report.cleanup_failure_reason.find("Corrupt magic") != std::string::npos,
+            "cleanup_failure_reason must capture journal failure.");
+
+        const auto json = format_json_report(report);
+        std::string err;
+        require(validate_report_schema(json, err), "Schema validation must pass.");
+        require(json.find("Frame sequence skipped from 42 to 99") != std::string::npos, "Primary failure must be in JSON.");
+        require(json.find("Corrupt magic in owner-index.fji") != std::string::npos, "Cleanup failure must be in JSON.");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -1168,9 +1806,10 @@ int main() {
     test_prohibition_of_apk_game_and_bypass();
     test_process_exit_verification_api_failures_and_injected_mocks();
     test_non_standard_exception_cleanup_handling();
+    test_durable_journal_verification_scenarios();
 
     std::cout << "\n================================================================================\n";
-    std::cout << " ALL 18 OFFLINE TEST SCENARIOS PASSED SUCCESSFULLY!\n";
+    std::cout << " ALL 19 OFFLINE TEST SUITES (28+ SCENARIOS) PASSED SUCCESSFULLY!\n";
     std::cout << "================================================================================\n";
     return 0;
 }

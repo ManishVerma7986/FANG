@@ -231,6 +231,17 @@ ReadinessWaitResult wait_for_readiness(
             last_recorded_state = current_state;
         }
 
+        if (!snapshot.runtime.generation_id.empty()) {
+            if (result.generation_id.empty()) {
+                result.generation_id = snapshot.runtime.generation_id;
+            } else if (snapshot.runtime.generation_id != result.generation_id) {
+                result.succeeded = false;
+                result.error = "Runtime generation discontinuity detected during readiness observation: expected " +
+                    result.generation_id + ", observed " + snapshot.runtime.generation_id;
+                break;
+            }
+        }
+
         if (snapshot.runtime.process_id != 0 && result.process_id == 0) {
             result.process_id = snapshot.runtime.process_id;
             result.process_creation_time = snapshot.runtime.process_creation_time;
@@ -341,6 +352,12 @@ std::string format_json_report(const VideoSmokeReport& report) {
 
     // Lifecycle evidence
     ss << "  \"lifecycle_evidence\": {\n";
+    ss << "    \"generation_id\": ";
+    if (!report.generation_id.empty()) {
+        ss << "\"" << escape_json(report.generation_id) << "\",\n";
+    } else {
+        ss << "null,\n";
+    }
     ss << "    \"owned_process_id\": " << report.owned_process_id << ",\n";
     ss << "    \"process_creation_time\": " << report.process_creation_time << ",\n";
     ss << "    \"containment_verified\": " << (report.containment_verified ? "true" : "false") << ",\n";

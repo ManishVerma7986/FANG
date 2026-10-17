@@ -50,6 +50,28 @@ public:
     OwnershipStoreLoadResult load_store();
     bool initialize_store_explicit(std::string& error);
 
+    // Authoritative durable verification for external runners and tools:
+    // validates that owner-index.fji and the .fjn journal tombstone prove
+    // that the exact expected generation was finalized as EmptyVerified.
+    static JournalLoadResult verify_durable_finalized(
+        const CanonicalAvdIdentity& identity,
+        std::string_view expected_generation,
+        const std::wstring& storage_root = {});
+
+    // Preflight inspection: verifies that no active or pending generation exists
+    // for this canonical identity in owner-index.fji or the identity journal.
+    static bool check_durable_initially_clean(
+        const CanonicalAvdIdentity& identity,
+        std::string& detail,
+        const std::wstring& storage_root = {});
+
+    // Utility helpers for canonical paths and permissions
+    static bool get_journal_path(const std::wstring& root,
+        const CanonicalAvdIdentity& identity, std::wstring& path, std::string& error);
+    static std::wstring get_owner_store_path(const std::wstring& root);
+    static bool apply_private_acl(const std::wstring& path,
+        const std::string& sid, std::string& error);
+
 private:
     friend class OwnershipSupervisor;
     // Supervisor-only: persists the verified-empty tombstone after the caller

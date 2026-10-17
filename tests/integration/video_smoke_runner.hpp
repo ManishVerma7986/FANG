@@ -85,6 +85,7 @@ struct VideoSmokeReport {
     bool journal_initially_clean{false};
 
     // Lifecycle evidence
+    std::string generation_id;
     std::uint32_t owned_process_id{0};
     std::uint64_t process_creation_time{0};
     bool containment_verified{false};
@@ -234,6 +235,7 @@ struct ReadinessWaitResult {
     bool succeeded{false};
     bool timed_out{false};
     std::uint64_t elapsed_ms{0};
+    std::string generation_id;
     std::uint32_t process_id{0};
     std::uint64_t process_creation_time{0};
     std::uint32_t active_processes{0};
