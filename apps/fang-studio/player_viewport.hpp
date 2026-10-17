@@ -9,6 +9,7 @@
 #include "studio_session.hpp"
 #include "video_transport.hpp"
 #include "viewport_renderer.hpp"
+#include "input_mapping_engine.hpp"
 
 #include <memory>
 #include <optional>
@@ -25,7 +26,8 @@ public:
     PlayerViewport(HWND parent, HINSTANCE instance, int control_id,
         std::shared_ptr<StudioInputRouter> router,
         std::shared_ptr<StudioVideoConsumer> video_consumer = nullptr,
-        std::unique_ptr<IViewportRenderer> renderer = nullptr);
+        std::unique_ptr<IViewportRenderer> renderer = nullptr,
+        std::shared_ptr<InputMappingEngine> mapping_engine = nullptr);
     PlayerViewport(const PlayerViewport&) = delete;
     PlayerViewport& operator=(const PlayerViewport&) = delete;
     ~PlayerViewport();
@@ -47,6 +49,9 @@ public:
     std::shared_ptr<StudioInputRouter> router() const noexcept { return router_; }
     std::shared_ptr<StudioVideoConsumer> video_consumer() const noexcept { return video_consumer_; }
     void set_video_consumer(std::shared_ptr<StudioVideoConsumer> consumer) noexcept { video_consumer_ = std::move(consumer); }
+
+    std::shared_ptr<InputMappingEngine> mapping_engine() const noexcept { return mapping_engine_; }
+    void set_mapping_engine(std::shared_ptr<InputMappingEngine> engine) noexcept { mapping_engine_ = std::move(engine); }
 
     IViewportRenderer* renderer() const noexcept { return renderer_.get(); }
     ViewportBackend active_backend() const noexcept {
@@ -77,6 +82,8 @@ private:
     HFONT font_small_{};
     std::shared_ptr<StudioVideoConsumer> video_consumer_;
     std::unique_ptr<IViewportRenderer> renderer_;
+    std::shared_ptr<InputMappingEngine> mapping_engine_;
+    POINT last_mouse_pt_{};
 };
 
 }

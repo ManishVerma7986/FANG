@@ -6,6 +6,11 @@
 #include "studio_input_router.hpp"
 #include "adb_input_dispatcher.hpp"
 #include "studio_session.hpp"
+#include "input_mapping_types.hpp"
+#include "touch_contact_model.hpp"
+#include "guest_input_bridge.hpp"
+#include "input_profile.hpp"
+#include "input_mapping_engine.hpp"
 
 #include <chrono>
 #include <condition_variable>
@@ -1033,6 +1038,505 @@ void test_player_viewport_session_states_and_fallback_rendering() {
         "Ambiguous input state must be stored.");
 }
 
+void test_profile_parsing_validation_and_errors() {
+    // 1. Valid profile JSON parsing
+    std::string valid_json = "{\n"
+        "  \"schema_version\": 1,\n"
+        "  \"id\": \"custom_profile\",\n"
+        "  \"name\": \"Custom Profile\",\n"
+        "  \"aim_sensitivity\": 1.5,\n"
+        "  \"aim_deadzone\": 0.05,\n"
+        "  \"key_bindings\": [\n"
+        "    {\"host_key\": 87, \"action_type\": 1, \"direction\": 0, \"name\": \"Move Up\"},\n"
+        "    {\"host_key\": 32, \"action_type\": 0, \"android_keycode\": 62, \"name\": \"Jump\"}\n"
+        "  ],\n"
+        "  \"mouse_bindings\": [\n"
+        "    {\"button\": 0, \"action_type\": 4, \"contact_id\": 0, \"name\": \"Primary Touch\"},\n"
+        "    {\"button\": 1, \"action_type\": 3, \"name\": \"Toggle Aim\"}\n"
+        "  ]\n"
+        "}";
+
+    std::string parse_err;
+    auto parsed_opt = InputProfile::parse_from_json(valid_json, parse_err);
+    require(parsed_opt.has_value(), "Valid JSON should parse into InputProfile: " + parse_err);
+    require(parsed_opt->id == "custom_profile", "Profile ID should match.");
+    require(parsed_opt->schema_version == 1, "Schema version should be 1.");
+    require(std::abs(parsed_opt->aim_sensitivity - 1.5f) < 0.001f, "Aim sensitivity should be 1.5.");
+    require(std::abs(parsed_opt->aim_deadzone - 0.05f) < 0.001f, "Aim deadzone should be 0.05.");
+    require(parsed_opt->key_bindings.size() == 2, "Should have 2 key bindings.");
+    require(parsed_opt->mouse_bindings.size() == 2, "Should have 2 mouse bindings.");
+
+    std::string val_err;
+    require(InputProfile::validate(*parsed_opt, val_err), "Parsed profile should pass validation: " + val_err);
+
+    // 2. Round-trip serialization
+    std::string serialized = InputProfile::serialize_to_json(*parsed_opt);
+    std::string roundtrip_err;
+    auto roundtrip_opt = InputProfile::parse_from_json(serialized, roundtrip_err);
+    require(roundtrip_opt.has_value(), "Serialized profile should be re-parseable: " + roundtrip_err);
+    require(roundtrip_opt->id == parsed_opt->id, "Round-trip profile ID must match.");
+    require(roundtrip_opt->key_bindings.size() == parsed_opt->key_bindings.size(), "Key bindings count must match.");
+
+    // 3. Unsupported schema version
+    InputProfile v2_profile = *parsed_opt;
+    v2_profile.schema_version = 2;
+    std::string v2_error;
+    require(!InputProfile::validate(v2_profile, v2_error), "Schema version 2 must be rejected.");
+    require(v2_error.find("Unsupported schema_version") != std::string::npos, "Validation error should mention version.");
+
+    // 4. Invalid numeric parameters
+    InputProfile bad_sens = *parsed_opt;
+    bad_sens.aim_sensitivity = -1.0f;
+    std::string sens_err;
+    require(!InputProfile::validate(bad_sens, sens_err), "Negative sensitivity must be rejected.");
+
+    bad_sens.aim_sensitivity = 20.0f;
+    require(!InputProfile::validate(bad_sens, sens_err), "Excessive sensitivity (>10) must be rejected.");
+
+    InputProfile bad_deadzone = *parsed_opt;
+    bad_deadzone.aim_deadzone = -0.1f;
+    std::string deadzone_err;
+    require(!InputProfile::validate(bad_deadzone, deadzone_err), "Negative deadzone must be rejected.");
+
+    bad_deadzone.aim_deadzone = 0.55f;
+    require(!InputProfile::validate(bad_deadzone, deadzone_err), "Deadzone >= 0.5 must be rejected.");
+
+    // 5. Invalid keycode
+    InputProfile bad_key = *parsed_opt;
+    bad_key.key_bindings.push_back(KeyBinding{0, MappedActionType::AndroidKey, 62, MovementDirection::Up, {}, 0, "Bad Key"});
+    std::string bad_key_err;
+    require(!InputProfile::validate(bad_key, bad_key_err), "Keycode 0 must be rejected.");
+
+    // 6. Duplicate key bindings
+    InputProfile dup_key = *parsed_opt;
+    dup_key.key_bindings.push_back(KeyBinding{87, MappedActionType::AndroidKey, 62, MovementDirection::Up, {}, 0, "Dup W"});
+    std::string dup_key_err;
+    require(!InputProfile::validate(dup_key, dup_key_err), "Duplicate key binding must be rejected.");
+
+    // 7. Malformed JSON
+    std::string malformed_err;
+    require(!InputProfile::parse_from_json("{broken json", malformed_err).has_value(), "Broken JSON must return nullopt.");
+    require(!InputProfile::parse_from_json("", malformed_err).has_value(), "Empty string must return nullopt.");
+}
+
+void test_default_profile_bindings() {
+    auto default_profile = InputProfile::create_default_gaming();
+    std::string error;
+    require(InputProfile::validate(default_profile, error), "Default gaming profile must validate: " + error);
+    require(default_profile.id == "default_gaming", "Default profile ID should be default_gaming.");
+    require(default_profile.schema_version == 1, "Default schema version must be 1.");
+
+    // Check WASD directional movement
+    const auto* w_binding = default_profile.find_key_binding('W');
+    require(w_binding != nullptr, "Binding for W must exist.");
+    require(w_binding->action_type == MappedActionType::DirectionalMovement, "W must be DirectionalMovement.");
+    require(w_binding->direction == MovementDirection::Up, "W direction must be Up.");
+
+    const auto* s_binding = default_profile.find_key_binding('S');
+    require(s_binding != nullptr, "Binding for S must exist.");
+    require(s_binding->direction == MovementDirection::Down, "S direction must be Down.");
+
+    const auto* a_binding = default_profile.find_key_binding('A');
+    require(a_binding != nullptr, "Binding for A must exist.");
+    require(a_binding->direction == MovementDirection::Left, "A direction must be Left.");
+
+    const auto* d_binding = default_profile.find_key_binding('D');
+    require(d_binding != nullptr, "Binding for D must exist.");
+    require(d_binding->direction == MovementDirection::Right, "D direction must be Right.");
+
+    // Space -> Jump (KEYCODE_SPACE = 62)
+    const auto* space_binding = default_profile.find_key_binding(VK_SPACE);
+    require(space_binding != nullptr, "Binding for Space must exist.");
+    require(space_binding->android_keycode == 62, "Space must map to KEYCODE_SPACE (62).");
+
+    // Mouse buttons
+    const auto* left_mouse = default_profile.find_mouse_binding(HostMouseButton::Left);
+    require(left_mouse != nullptr, "Left mouse button binding must exist.");
+    require(left_mouse->action_type == MappedActionType::TouchContact, "Left mouse must be TouchContact.");
+
+    const auto* right_mouse = default_profile.find_mouse_binding(HostMouseButton::Right);
+    require(right_mouse != nullptr, "Right mouse button binding must exist.");
+    require(right_mouse->action_type == MappedActionType::AimModeToggle, "Right mouse must be AimModeToggle.");
+
+    // Esc
+    const auto* esc_binding = default_profile.find_key_binding(VK_ESCAPE);
+    require(esc_binding != nullptr, "Binding for Escape must exist.");
+    require(esc_binding->action_type == MappedActionType::AimModeToggle, "Escape must map to AimModeToggle.");
+}
+
+void test_key_transitions_and_repeat_suppression() {
+    InputMappingEngine engine;
+    engine.set_display_dimensions({1080, 1920});
+
+    // 1. Viewport unfocused -> inputs rejected
+    engine.set_viewport_focused(false);
+    HostKeyboardEvent evt_w_down{'W', true, false, 1000};
+    auto res = engine.process_keyboard_event(evt_w_down);
+    require(!res.success, "Keydown while unfocused must be rejected.");
+    require(res.rejection_reason == MappingRejectionReason::ViewportUnfocused, "Rejection reason must be ViewportUnfocused.");
+
+    // 2. Viewport focused -> valid keydown
+    engine.set_viewport_focused(true);
+    res = engine.process_keyboard_event(evt_w_down);
+    require(res.success, "Keydown while focused must be accepted.");
+    require(res.actions.front().type == MappedActionType::DirectionalMovement, "W must produce DirectionalMovement.");
+    require(res.actions.front().is_down, "Action must indicate key down.");
+    require(engine.is_key_held('W'), "W must be tracked as held.");
+
+    // 3. Typematic repeated keydown -> suppressed
+    HostKeyboardEvent evt_w_repeat{'W', true, true, 1050};
+    res = engine.process_keyboard_event(evt_w_repeat);
+    require(!res.success, "Repeated keydown must be suppressed.");
+    require(res.rejection_reason == MappingRejectionReason::RepeatedKeyDownSuppressed, "Rejection reason must be RepeatedKeyDownSuppressed.");
+    require(engine.is_key_held('W'), "W must remain held.");
+
+    // 4. Keyup -> valid release
+    HostKeyboardEvent evt_w_up{'W', false, false, 1100};
+    res = engine.process_keyboard_event(evt_w_up);
+    require(res.success, "Keyup must be accepted.");
+    require(!res.actions.front().is_down, "Action must indicate key release.");
+    require(!engine.is_key_held('W'), "W must no longer be held.");
+
+    // 5. Unmapped key -> rejected
+    HostKeyboardEvent evt_unmapped{VK_F12, true, false, 1200};
+    res = engine.process_keyboard_event(evt_unmapped);
+    require(!res.success, "Unmapped key must be rejected.");
+    require(res.rejection_reason == MappingRejectionReason::UnmappedInput, "Reason must be UnmappedInput.");
+}
+
+void test_pointer_aim_and_mouse_buttons() {
+    InputMappingEngine engine;
+    engine.set_viewport_focused(true);
+    engine.set_display_dimensions({1080, 1920});
+    RECT client_rect{0, 0, 360, 640};
+
+    // 1. Pointer move with aim mode disabled -> rejected
+    require(!engine.is_aim_mode_enabled(), "Aim mode must initially be disabled.");
+    HostPointerMoveEvent move_evt{180, 320, 15, -8, 2000};
+    auto res_move = engine.process_pointer_move(move_evt, client_rect);
+    require(!res_move.success, "Pointer move rejected when aim mode is disabled.");
+    require(res_move.rejection_reason == MappingRejectionReason::GameplayModeDisabled, "Reason must be GameplayModeDisabled.");
+
+    // 2. Right click -> toggles aim mode ON
+    HostPointerButtonEvent rdown{HostMouseButton::Right, true, 180, 320, 2010};
+    auto res_rdown = engine.process_pointer_button(rdown, client_rect);
+    require(res_rdown.success, "Right click down should be accepted.");
+    require(res_rdown.actions.front().type == MappedActionType::AimModeToggle, "Right click must be AimModeToggle.");
+    require(engine.is_aim_mode_enabled(), "Aim mode should now be enabled.");
+
+    // 3. Pointer move with aim mode enabled -> produces PointerAim action
+    res_move = engine.process_pointer_move(move_evt, client_rect);
+    require(res_move.success, "Pointer move should be accepted when aim mode is active.");
+    require(res_move.actions.front().type == MappedActionType::PointerAim, "Should produce PointerAim action.");
+    require(res_move.actions.front().aim_delta_x > 0.0f, "aim_delta_x should be positive.");
+    require(res_move.actions.front().aim_delta_y < 0.0f, "aim_delta_y should be negative.");
+
+    // 4. Deadzone filtering
+    HostPointerMoveEvent tiny_move{180, 320, 0, 0, 2020};
+    auto res_tiny = engine.process_pointer_move(tiny_move, client_rect);
+    require(res_tiny.success, "Zero move is accepted.");
+    require(res_tiny.actions.front().aim_delta_x == 0.0f && res_tiny.actions.front().aim_delta_y == 0.0f, "Zero delta must be zero.");
+
+    // 5. Left click down -> TouchContact Down
+    HostPointerButtonEvent ldown{HostMouseButton::Left, true, 180, 320, 2030};
+    auto res_ldown = engine.process_pointer_button(ldown, client_rect);
+    require(res_ldown.success, "Left click down should be accepted.");
+    require(res_ldown.actions.front().type == MappedActionType::TouchContact, "Should produce TouchContact.");
+    require(res_ldown.actions.front().touch_transition == TouchTransition::Down, "Transition must be Down.");
+    require(res_ldown.actions.front().contact_id == 0, "Contact ID should be 0.");
+    require(engine.is_button_held(HostMouseButton::Left), "Left button should be recorded as held.");
+    require(engine.active_contact_count() == 1, "Touch slot 0 should be active.");
+
+    // 6. Left click up -> TouchContact Up
+    HostPointerButtonEvent lup{HostMouseButton::Left, false, 180, 320, 2040};
+    auto res_lup = engine.process_pointer_button(lup, client_rect);
+    require(res_lup.success, "Left click up should be accepted.");
+    require(res_lup.actions.front().touch_transition == TouchTransition::Up, "Transition must be Up.");
+    require(!engine.is_button_held(HostMouseButton::Left), "Left button should no longer be held.");
+    require(engine.active_contact_count() == 0, "Touch slot 0 should no longer be active.");
+}
+
+void test_profile_switching_held_state_cleanup() {
+    InputMappingEngine engine;
+    engine.set_viewport_focused(true);
+    engine.set_display_dimensions({1080, 1920});
+    RECT client_rect{0, 0, 360, 640};
+
+    // Hold 'W' and 'A'
+    engine.process_keyboard_event({'W', true, false, 3000});
+    engine.process_keyboard_event({'A', true, false, 3010});
+    // Hold Left mouse button
+    engine.process_pointer_button({HostMouseButton::Left, true, 180, 320, 3020}, client_rect);
+
+    require(engine.is_key_held('W'), "W should be held.");
+    require(engine.is_key_held('A'), "A should be held.");
+    require(engine.is_button_held(HostMouseButton::Left), "Left button should be held.");
+    require(engine.active_contact_count() == 1, "1 contact should be active.");
+
+    // Switch profile to custom profile
+    InputProfile custom_profile;
+    custom_profile.id = "test_switch";
+    custom_profile.schema_version = 1;
+    custom_profile.aim_sensitivity = 1.0f;
+    custom_profile.aim_deadzone = 0.05f;
+
+    auto cleanup_actions = engine.set_profile(custom_profile);
+    require(cleanup_actions.size() >= 3, "Profile switch must emit cleanup actions for held controls.");
+
+    // Verify all host state is clean
+    require(!engine.is_key_held('W'), "W must not remain held after profile switch.");
+    require(!engine.is_key_held('A'), "A must not remain held after profile switch.");
+    require(!engine.is_button_held(HostMouseButton::Left), "Left button must not remain held after profile switch.");
+    require(engine.active_contact_count() == 0, "No contacts should remain active.");
+    require(engine.active_profile().id == "test_switch", "Profile ID should now be test_switch.");
+}
+
+void test_focus_loss_and_shutdown_cleanup() {
+    InputMappingEngine engine;
+    engine.set_viewport_focused(true);
+    engine.set_display_dimensions({1080, 1920});
+    RECT client_rect{0, 0, 360, 640};
+
+    // Turn on aim mode, hold 'W', hold Left button
+    engine.process_pointer_button({HostMouseButton::Right, true, 180, 320, 4000}, client_rect);
+    require(engine.is_aim_mode_enabled(), "Aim mode enabled.");
+    engine.process_keyboard_event({'W', true, false, 4010});
+    engine.process_pointer_button({HostMouseButton::Left, true, 180, 320, 4020}, client_rect);
+
+    // Focus loss
+    auto focus_cleanup = engine.process_focus_loss();
+    require(!engine.is_viewport_focused(), "Viewport focus should be false.");
+    require(!engine.is_aim_mode_enabled(), "Aim mode must be cancelled on focus loss.");
+    require(!engine.is_key_held('W'), "W must be released on focus loss.");
+    require(!engine.is_button_held(HostMouseButton::Left), "Left button must be released on focus loss.");
+    require(engine.active_contact_count() == 0, "Active contacts must be cancelled on focus loss.");
+
+    bool found_w_release = false;
+    bool found_contact_cancel = false;
+    for (const auto& act : focus_cleanup) {
+        if (act.type == MappedActionType::DirectionalMovement && !act.is_down) {
+            found_w_release = true;
+        }
+        if (act.type == MappedActionType::TouchContact && act.touch_transition == TouchTransition::Cancel) {
+            found_contact_cancel = true;
+        }
+    }
+    require(found_w_release, "Focus loss must emit release for W.");
+    require(found_contact_cancel, "Focus loss must emit cancellation for active contact.");
+
+    // Subsequent reset_all_state
+    auto reset_cleanup = engine.reset_all_state();
+    require(reset_cleanup.empty(), "Reset after clean state emits no cleanup actions.");
+}
+
+void test_session_generation_tracking() {
+    auto mock_executor = std::make_shared<MockProcessExecutor>();
+    AdbInputDispatcherConfig config;
+    config.adb_executable = "test_adb.exe";
+    auto dispatcher = std::make_shared<AdbInputDispatcher>(config, mock_executor);
+    dispatcher->start();
+
+    auto router = std::make_shared<StudioInputRouter>(dispatcher);
+    auto consumer = std::make_shared<StudioVideoConsumer>(2);
+    auto transport = std::make_shared<SharedMemoryVideoTransport>(consumer);
+    auto mapping_engine = std::make_shared<InputMappingEngine>();
+
+    StudioSessionController session(router, dispatcher, consumer, transport, mapping_engine);
+
+    SupervisorRuntimeSnapshot ready_snap;
+    ready_snap.runtime.state = fang::broker::RuntimeLifecycleState::Ready;
+    ready_snap.runtime.guest_ready = true;
+    ready_snap.runtime.generation_id = "gen-1";
+    ready_snap.runtime.adb_serial = "emulator-5554";
+    ready_snap.runtime.process_id = 1234;
+
+    auto snap = session.update(ready_snap, ViewportBackend::Direct3D11, 0);
+    require(snap.generation_id == "gen-1", "Session must reflect gen-1.");
+    require(router->is_guest_ready(), "Router must be guest ready.");
+
+    // Advance generation to gen-2
+    SupervisorRuntimeSnapshot switch_snap;
+    switch_snap.runtime.state = fang::broker::RuntimeLifecycleState::Starting;
+    switch_snap.runtime.generation_id = "gen-2";
+    switch_snap.runtime.process_id = 5678;
+
+    snap = session.update(switch_snap, ViewportBackend::Direct3D11, 0);
+    require(snap.generation_id == "gen-2", "Session must reflect gen-2.");
+    require(!router->is_guest_ready(), "Router must not be guest ready during gen switch.");
+
+    dispatcher->stop();
+}
+
+void test_mapping_rejection_guest_unready_and_ambiguous() {
+    auto mock_dispatcher = std::make_shared<MockInputDispatcher>();
+    StudioInputRouter router(mock_dispatcher, 8);
+
+    MappedAction act;
+    act.type = MappedActionType::AndroidKey;
+    act.android_keycode = 62;
+    act.is_down = true;
+
+    // 1. Guest not ready
+    router.set_guest_ready(false);
+    router.set_target_ambiguous(false);
+    auto res = router.route_mapped_action(act);
+    require(res == InputRoutingResult::DroppedGuestNotReady, "Must drop when guest is not ready.");
+
+    // 2. Ambiguous target binding
+    router.set_guest_ready(true);
+    router.set_target_ambiguous(true);
+    res = router.route_mapped_action(act);
+    require(res == InputRoutingResult::DroppedAmbiguousTarget, "Must drop when target is ambiguous.");
+}
+
+void test_touch_contact_model_coordinate_conversions() {
+    DisplayDimensions display{1080, 1920};
+
+    // 1. 1:1 Aspect ratio match
+    RECT client_rect{0, 0, 360, 640};
+
+    auto norm_opt = MultiTouchContactModel::map_client_to_normalized({180, 320}, client_rect, display, true);
+    require(norm_opt.has_value(), "Center point should map to normalized.");
+    require(std::abs(norm_opt->u - 0.5f) < 0.01f, "Normalized U should be ~0.5.");
+    require(std::abs(norm_opt->v - 0.5f) < 0.01f, "Normalized V should be ~0.5.");
+
+    auto guest_pt = MultiTouchContactModel::map_normalized_to_guest(*norm_opt, display);
+    require(std::abs(guest_pt.x - 540) <= 2, "Guest X should be ~540.");
+    require(std::abs(guest_pt.y - 960) <= 2, "Guest Y should be ~960.");
+
+    // 2. Pillarboxing / Letterboxing
+    RECT wide_rect{0, 0, 800, 600};
+
+    // Point in pillarbox margin with clamp=false should be nullopt
+    auto out_norm = MultiTouchContactModel::map_client_to_normalized({10, 300}, wide_rect, display, false);
+    require(!out_norm.has_value(), "Point in pillarbox margin should not map when clamp=false.");
+
+    // Point in pillarbox margin with clamp=true should clamp to [0.0, 1.0]
+    auto clamped_norm = MultiTouchContactModel::map_client_to_normalized({10, 300}, wide_rect, display, true);
+    require(clamped_norm.has_value(), "Point in pillarbox margin should clamp when clamp=true.");
+    require(clamped_norm->u == 0.0f, "Clamped margin U must be 0.0.");
+
+    // 3. Display boundary clamping
+    auto bottom_right = MultiTouchContactModel::map_normalized_to_guest({1.0f, 1.0f}, display);
+    require(bottom_right.x == 1079, "Max guest X must clamp to 1079.");
+    require(bottom_right.y == 1919, "Max guest Y must clamp to 1919.");
+
+    auto top_left = MultiTouchContactModel::map_normalized_to_guest({0.0f, 0.0f}, display);
+    require(top_left.x == 0, "Min guest X must be 0.");
+    require(top_left.y == 0, "Min guest Y must be 0.");
+}
+
+void test_multi_contact_transitions_and_limits() {
+    MultiTouchContactModel model;
+    DisplayDimensions display{1080, 1920};
+
+    // 1. Begin contacts
+    auto res0 = model.begin_contact(0, {0.2f, 0.3f}, display, 5000);
+    require(res0.success, "Begin contact 0 should succeed.");
+    require(model.active_contact_count() == 1, "Active contacts should be 1.");
+
+    auto res1 = model.begin_contact(1, {0.7f, 0.8f}, display, 5010);
+    require(res1.success, "Begin contact 1 should succeed.");
+    require(model.active_contact_count() == 2, "Active contacts should be 2.");
+
+    // 2. Move contacts
+    auto res_move = model.move_contact(0, {0.25f, 0.35f}, display, 5020);
+    require(res_move.success, "Move contact 0 should succeed.");
+    require(res_move.actions.front().touch_transition == TouchTransition::Move, "Transition should be Move.");
+
+    // 3. End contact
+    auto res_end = model.end_contact(1, 5030);
+    require(res_end.success, "End contact 1 should succeed.");
+    require(model.active_contact_count() == 1, "Active contacts should be 1.");
+    require(!model.is_contact_active(1), "Contact 1 should no longer be active.");
+
+    // 4. Invalid transitions on inactive contact
+    auto res_bad_move = model.move_contact(1, {0.8f, 0.8f}, display, 5040);
+    require(!res_bad_move.success, "Moving inactive contact must be rejected.");
+    require(res_bad_move.rejection_reason == MappingRejectionReason::InvalidContactId, "Reason must be InvalidContactId.");
+
+    auto res_bad_end = model.end_contact(1, 5050);
+    require(!res_bad_end.success, "Ending inactive contact must be rejected.");
+
+    // 5. Contact ID exceeds maximum
+    auto res_oob = model.begin_contact(99, {0.5f, 0.5f}, display, 5060);
+    require(!res_oob.success, "Contact ID 99 must be rejected.");
+    require(res_oob.rejection_reason == MappingRejectionReason::InvalidContactId, "Reason must be InvalidContactId.");
+
+    // 6. Cancel all contacts
+    auto cancel_acts = model.cancel_all_contacts();
+    require(cancel_acts.size() == 1, "Should cancel the 1 remaining active contact.");
+    require(cancel_acts[0].contact_id == 0, "Cancelled contact should be 0.");
+    require(cancel_acts[0].touch_transition == TouchTransition::Cancel, "Transition must be Cancel.");
+    require(model.active_contact_count() == 0, "Active contacts must be 0 after cancel all.");
+}
+
+void test_multi_touch_capability_reporting() {
+    UnconfiguredAdbGuestInputBridge adb_bridge;
+    require(adb_bridge.capability() == MultiTouchBackendCapability::Unsupported,
+        "ADB bridge must explicitly report Unsupported for multi-touch capability.");
+    require(!adb_bridge.status_diagnostic().empty(), "Status description must be non-empty.");
+    require(adb_bridge.status_diagnostic().find("ADB") != std::string::npos,
+        "Status description should mention ADB CLI limitations.");
+
+    // Dispatching touch to unsupported backend
+    std::vector<TouchContactState> contacts;
+    require(!adb_bridge.send_touch_frame(contacts),
+        "Sending multi-touch frame to unconfigured ADB bridge must fail safely.");
+
+    // Mapping engine exposes bridge capability
+    InputMappingEngine engine;
+    require(engine.multi_touch_capability() == MultiTouchBackendCapability::Unsupported,
+        "Engine default capability must match unconfigured bridge.");
+
+    require(!engine.contact_model().backend_capability_diagnostic().empty(),
+        "Diagnostics should describe backend capability.");
+}
+
+void test_input_queue_overflow_no_stuck_state() {
+    // Small queue capacity = 2, no immediate dispatcher so items are queued
+    StudioInputRouter router(nullptr, 2);
+    router.set_adb_serial("emulator-5554");
+    router.set_guest_ready(true);
+    router.set_target_ambiguous(false);
+
+    InputMappingEngine engine;
+    engine.set_viewport_focused(true);
+    engine.set_display_dimensions({1080, 1920});
+
+    // Press 'W' -> queued
+    auto res_w = engine.process_keyboard_event({'W', true, false, 7000});
+    require(res_w.success, "Keydown W should succeed.");
+    auto r_res1 = router.route_mapped_action(res_w.actions.front());
+    require(r_res1 == InputRoutingResult::Success, "Action 1 should queue successfully.");
+
+    // Press 'A' -> queued
+    auto res_a = engine.process_keyboard_event({'A', true, false, 7010});
+    require(res_a.success, "Keydown A should succeed.");
+    auto r_res2 = router.route_mapped_action(res_a.actions.front());
+    require(r_res2 == InputRoutingResult::Success, "Action 2 should queue successfully.");
+
+    // Press 'S' -> queue overflow!
+    auto res_s = engine.process_keyboard_event({'S', true, false, 7020});
+    require(res_s.success, "Keydown S should succeed in engine.");
+    auto r_res3 = router.route_mapped_action(res_s.actions.front());
+    require(r_res3 == InputRoutingResult::DroppedQueueFull, "Action 3 must be dropped due to queue overflow.");
+    require(router.dropped_event_count() == 1, "Dropped count should be 1.");
+
+    // Even though routing dropped Action 3, engine maintains coherent host state
+    require(engine.is_key_held('W'), "W is held.");
+    require(engine.is_key_held('A'), "A is held.");
+    require(engine.is_key_held('S'), "S is held.");
+
+    // Releasing keys updates engine state cleanly
+    engine.process_keyboard_event({'W', false, false, 7030});
+    engine.process_keyboard_event({'A', false, false, 7040});
+    engine.process_keyboard_event({'S', false, false, 7050});
+    require(!engine.is_key_held('W'), "W released.");
+    require(!engine.is_key_held('A'), "A released.");
+    require(!engine.is_key_held('S'), "S released.");
+}
+
 }
 
 int main() {
@@ -1061,7 +1565,19 @@ int main() {
         test_session_controller_failed_startup_recovery();
         test_session_shutdown_with_active_workers_and_queue();
         test_player_viewport_session_states_and_fallback_rendering();
-        std::cout << "All studio player viewport, input forwarding, session integration, and D3D11 presentation tests passed successfully.\n";
+        test_profile_parsing_validation_and_errors();
+        test_default_profile_bindings();
+        test_key_transitions_and_repeat_suppression();
+        test_pointer_aim_and_mouse_buttons();
+        test_profile_switching_held_state_cleanup();
+        test_focus_loss_and_shutdown_cleanup();
+        test_session_generation_tracking();
+        test_mapping_rejection_guest_unready_and_ambiguous();
+        test_touch_contact_model_coordinate_conversions();
+        test_multi_contact_transitions_and_limits();
+        test_multi_touch_capability_reporting();
+        test_input_queue_overflow_no_stuck_state();
+        std::cout << "All studio player viewport, input forwarding, session integration, input mapping profiles, multi-touch architecture, and D3D11 presentation tests passed successfully.\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "Test failed: " << error.what() << '\n';

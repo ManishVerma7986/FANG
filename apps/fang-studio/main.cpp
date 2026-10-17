@@ -22,6 +22,7 @@
 #include "adb_input_dispatcher.hpp"
 #include "video_transport.hpp"
 #include "studio_session.hpp"
+#include "input_mapping_engine.hpp"
 
 namespace {
 
@@ -77,6 +78,7 @@ struct StudioApp {
     std::shared_ptr<fang::studio::AdbInputDispatcher> adb_dispatcher;
     std::shared_ptr<fang::studio::StudioVideoConsumer> video_consumer;
     std::shared_ptr<fang::studio::SharedMemoryVideoTransport> video_transport;
+    std::shared_ptr<fang::studio::InputMappingEngine> input_mapping_engine;
     std::shared_ptr<fang::studio::StudioSessionController> session_controller;
     std::unique_ptr<fang::studio::PlayerViewport> player_viewport;
     std::string initialization_error;
@@ -110,8 +112,9 @@ struct StudioApp {
         }
         video_consumer = std::make_shared<fang::studio::StudioVideoConsumer>(2);
         video_transport = std::make_shared<fang::studio::SharedMemoryVideoTransport>(video_consumer);
+        input_mapping_engine = std::make_shared<fang::studio::InputMappingEngine>();
         session_controller = std::make_shared<fang::studio::StudioSessionController>(
-            input_router, adb_dispatcher, video_consumer, video_transport);
+            input_router, adb_dispatcher, video_consumer, video_transport, input_mapping_engine);
         emulator = fang::studio::discover_android_emulator();
         const auto identity = fang::broker::current_user_identity();
         if (!identity.succeeded) {
@@ -364,7 +367,7 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM w_param, LPA
         app->viewport_header = create_control(window, L"STATIC", L"Player Viewport (Stage 2D)", SS_LEFT, static_cast<int>(ControlId::ViewportHeader));
 
         app->player_viewport = std::make_unique<fang::studio::PlayerViewport>(
-            window, GetModuleHandleW(nullptr), player_viewport_id, app->input_router, app->video_consumer);
+            window, GetModuleHandleW(nullptr), player_viewport_id, app->input_router, app->video_consumer, nullptr, app->input_mapping_engine);
 
         const auto font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
         for (const auto control : {app->title, app->core_status, app->runtime_status, app->avd_label, app->avd_combo,

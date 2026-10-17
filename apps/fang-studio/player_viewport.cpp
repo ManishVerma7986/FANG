@@ -51,10 +51,15 @@ bool PlayerViewport::register_class(HINSTANCE instance) {
 PlayerViewport::PlayerViewport(HWND parent, HINSTANCE instance, int control_id,
     std::shared_ptr<StudioInputRouter> router,
     std::shared_ptr<StudioVideoConsumer> video_consumer,
-    std::unique_ptr<IViewportRenderer> renderer)
+    std::unique_ptr<IViewportRenderer> renderer,
+    std::shared_ptr<InputMappingEngine> mapping_engine)
     : parent_(parent), router_(std::move(router)),
       video_consumer_(std::move(video_consumer)),
-      renderer_(std::move(renderer)) {
+      renderer_(std::move(renderer)),
+      mapping_engine_(std::move(mapping_engine)) {
+    if (!mapping_engine_) {
+        mapping_engine_ = std::make_shared<InputMappingEngine>();
+    }
     register_class(instance);
 
     font_title_ = CreateFontW(-14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
@@ -242,6 +247,9 @@ LRESULT PlayerViewport::handle_message(UINT message, WPARAM w_param, LPARAM l_pa
     }
     case WM_SETFOCUS:
         has_focus_ = true;
+        if (mapping_engine_) {
+            mapping_engine_->set_viewport_focused(true);
+        }
         InvalidateRect(window_, nullptr, FALSE);
         return 0;
     case WM_KILLFOCUS:
@@ -251,34 +259,74 @@ LRESULT PlayerViewport::handle_message(UINT message, WPARAM w_param, LPARAM l_pa
             active_touch_pt_.reset();
             dragging_ = false;
         }
+        if (mapping_engine_) {
+            const auto cancellations = mapping_engine_->process_focus_loss();
+            if (router_) {
+                for (const auto& act : cancellations) {
+                    router_->route_mapped_action(act);
+                }
+            }
+        }
         InvalidateRect(window_, nullptr, FALSE);
         return 0;
-    case WM_LBUTTONDOWN: {
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN: {
         SetFocus(window_);
         const POINT pt{static_cast<short>(LOWORD(l_param)), static_cast<short>(HIWORD(l_param))};
+        last_mouse_pt_ = pt;
         RECT client_rect{};
         GetClientRect(window_, &client_rect);
 
-        const auto mapped = map_client_to_display(pt, client_rect, {});
-        if (mapped.has_value()) {
-            SetCapture(window_);
-            active_touch_pt_ = mapped;
-            dragging_ = false;
-            drag_start_pt_ = pt;
+        const HostMouseButton btn = (message == WM_LBUTTONDOWN) ? HostMouseButton::Left :
+                                    (message == WM_RBUTTONDOWN) ? HostMouseButton::Right :
+                                    HostMouseButton::Middle;
 
-            if (router_) {
-                router_->route_pointer_down(pt, client_rect, {});
+        if (mapping_engine_ && mapping_engine_->is_gameplay_mode_enabled()) {
+            HostPointerButtonEvent btn_ev{btn, true, pt.x, pt.y, GetTickCount64()};
+            const auto res = mapping_engine_->process_pointer_button(btn_ev, client_rect);
+            if (res.success && router_) {
+                for (const auto& act : res.actions) {
+                    router_->route_mapped_action(act);
+                }
             }
-            InvalidateRect(window_, nullptr, FALSE);
         }
+
+        if (message == WM_LBUTTONDOWN) {
+            const auto mapped = map_client_to_display(pt, client_rect, {});
+            if (mapped.has_value()) {
+                SetCapture(window_);
+                active_touch_pt_ = mapped;
+                dragging_ = false;
+                drag_start_pt_ = pt;
+
+                if (router_ && (!mapping_engine_ || !mapping_engine_->is_gameplay_mode_enabled())) {
+                    router_->route_pointer_down(pt, client_rect, {});
+                }
+            }
+        }
+        InvalidateRect(window_, nullptr, FALSE);
         return 0;
     }
     case WM_MOUSEMOVE: {
-        if (GetCapture() == window_) {
-            const POINT pt{static_cast<short>(LOWORD(l_param)), static_cast<short>(HIWORD(l_param))};
-            RECT client_rect{};
-            GetClientRect(window_, &client_rect);
+        const POINT pt{static_cast<short>(LOWORD(l_param)), static_cast<short>(HIWORD(l_param))};
+        const int delta_x = pt.x - last_mouse_pt_.x;
+        const int delta_y = pt.y - last_mouse_pt_.y;
+        last_mouse_pt_ = pt;
+        RECT client_rect{};
+        GetClientRect(window_, &client_rect);
 
+        if (mapping_engine_) {
+            HostPointerMoveEvent move_ev{pt.x, pt.y, delta_x, delta_y, GetTickCount64()};
+            const auto res = mapping_engine_->process_pointer_move(move_ev, client_rect);
+            if (res.success && router_) {
+                for (const auto& act : res.actions) {
+                    router_->route_mapped_action(act);
+                }
+            }
+        }
+
+        if (GetCapture() == window_) {
             const int dx = pt.x - drag_start_pt_.x;
             const int dy = pt.y - drag_start_pt_.y;
             if (!dragging_ && (dx * dx + dy * dy >= 16)) {
@@ -288,18 +336,35 @@ LRESULT PlayerViewport::handle_message(UINT message, WPARAM w_param, LPARAM l_pa
             const auto mapped = map_client_to_display(pt, client_rect, {});
             if (mapped.has_value()) {
                 active_touch_pt_ = mapped;
-                InvalidateRect(window_, nullptr, FALSE);
             }
         }
+        InvalidateRect(window_, nullptr, FALSE);
         return 0;
     }
-    case WM_LBUTTONUP: {
-        if (GetCapture() == window_) {
-            const POINT pt{static_cast<short>(LOWORD(l_param)), static_cast<short>(HIWORD(l_param))};
-            RECT client_rect{};
-            GetClientRect(window_, &client_rect);
+    case WM_LBUTTONUP:
+    case WM_RBUTTONUP:
+    case WM_MBUTTONUP: {
+        const POINT pt{static_cast<short>(LOWORD(l_param)), static_cast<short>(HIWORD(l_param))};
+        last_mouse_pt_ = pt;
+        RECT client_rect{};
+        GetClientRect(window_, &client_rect);
 
-            if (router_) {
+        const HostMouseButton btn = (message == WM_LBUTTONUP) ? HostMouseButton::Left :
+                                    (message == WM_RBUTTONUP) ? HostMouseButton::Right :
+                                    HostMouseButton::Middle;
+
+        if (mapping_engine_ && mapping_engine_->is_gameplay_mode_enabled()) {
+            HostPointerButtonEvent btn_ev{btn, false, pt.x, pt.y, GetTickCount64()};
+            const auto res = mapping_engine_->process_pointer_button(btn_ev, client_rect);
+            if (res.success && router_) {
+                for (const auto& act : res.actions) {
+                    router_->route_mapped_action(act);
+                }
+            }
+        }
+
+        if (message == WM_LBUTTONUP && GetCapture() == window_) {
+            if (router_ && (!mapping_engine_ || !mapping_engine_->is_gameplay_mode_enabled())) {
                 if (dragging_) {
                     router_->route_pointer_drag(drag_start_pt_, pt, client_rect, 100, {});
                 } else {
@@ -310,8 +375,8 @@ LRESULT PlayerViewport::handle_message(UINT message, WPARAM w_param, LPARAM l_pa
             active_touch_pt_.reset();
             dragging_ = false;
             ReleaseCapture();
-            InvalidateRect(window_, nullptr, FALSE);
         }
+        InvalidateRect(window_, nullptr, FALSE);
         return 0;
     }
     case WM_CAPTURECHANGED:
@@ -319,16 +384,61 @@ LRESULT PlayerViewport::handle_message(UINT message, WPARAM w_param, LPARAM l_pa
         dragging_ = false;
         InvalidateRect(window_, nullptr, FALSE);
         return 0;
-    case WM_KEYDOWN:
+    case WM_KEYDOWN: {
         if (w_param == VK_ESCAPE) {
+            if (mapping_engine_ && mapping_engine_->is_aim_mode_enabled()) {
+                mapping_engine_->set_aim_mode_enabled(false);
+                InvalidateRect(window_, nullptr, FALSE);
+                return 0;
+            }
             release_focus_to_parent();
             return 0;
         }
+
+        if (mapping_engine_ && mapping_engine_->is_gameplay_mode_enabled()) {
+            HostKeyboardEvent key_ev{
+                static_cast<uint32_t>(w_param),
+                true,
+                (l_param & (1 << 30)) != 0,
+                GetTickCount64()
+            };
+            const auto res = mapping_engine_->process_keyboard_event(key_ev);
+            if (res.success) {
+                if (router_) {
+                    for (const auto& act : res.actions) {
+                        router_->route_mapped_action(act);
+                    }
+                }
+                InvalidateRect(window_, nullptr, FALSE);
+                return 0;
+            }
+        }
+
         if (router_) {
             router_->route_key_down(w_param);
             InvalidateRect(window_, nullptr, FALSE);
         }
         return 0;
+    }
+    case WM_KEYUP: {
+        if (mapping_engine_ && mapping_engine_->is_gameplay_mode_enabled()) {
+            HostKeyboardEvent key_ev{
+                static_cast<uint32_t>(w_param),
+                false,
+                false,
+                GetTickCount64()
+            };
+            const auto res = mapping_engine_->process_keyboard_event(key_ev);
+            if (res.success && router_) {
+                for (const auto& act : res.actions) {
+                    router_->route_mapped_action(act);
+                }
+            }
+            InvalidateRect(window_, nullptr, FALSE);
+            return 0;
+        }
+        return 0;
+    }
     case WM_DESTROY:
         window_ = nullptr;
         return 0;
@@ -413,6 +523,23 @@ void PlayerViewport::paint(HDC target_dc) {
                 DeleteObject(touch_brush);
             }
 
+            // Aim Mode Crosshair indicator
+            if (mapping_engine_ && mapping_engine_->is_aim_mode_enabled() && screen_width > 0 && screen_height > 0) {
+                const int cx = screen_rect.left + screen_width / 2;
+                const int cy = screen_rect.top + screen_height / 2;
+                HPEN aim_pen = CreatePen(PS_SOLID, 2, RGB(255, 70, 70));
+                SelectObject(dc, aim_pen);
+                MoveToEx(dc, cx - 12, cy, nullptr);
+                LineTo(dc, cx - 3, cy);
+                MoveToEx(dc, cx + 4, cy, nullptr);
+                LineTo(dc, cx + 13, cy);
+                MoveToEx(dc, cx, cy - 12, nullptr);
+                LineTo(dc, cx, cy - 3);
+                MoveToEx(dc, cx, cy + 4, nullptr);
+                LineTo(dc, cx, cy + 13);
+                DeleteObject(aim_pen);
+            }
+
             // Screen footer info with host upload/present metrics
             SelectObject(dc, font_small_);
             SetTextColor(dc, RGB(180, 230, 250));
@@ -437,8 +564,8 @@ void PlayerViewport::paint(HDC target_dc) {
         SelectObject(dc, font_small_);
         SetTextColor(dc, RGB(110, 120, 135));
         std::wstring stage_footer = renderer_ && renderer_->active_backend() == ViewportBackend::Direct3D11
-            ? L"Stage 4 Integrated Studio Viewport | Direct3D 11 (Hardware Accelerated)"
-            : L"Stage 4 Integrated Studio Viewport | GDI (Software Fallback)";
+            ? L"Stage 5 Studio Input Keymapper & Multi-Touch | Direct3D 11 (Hardware Accelerated)"
+            : L"Stage 5 Studio Input Keymapper & Multi-Touch | GDI (Software Fallback)";
         DrawTextW(dc, stage_footer.c_str(), -1, const_cast<LPRECT>(&bottom_rect), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     };
 

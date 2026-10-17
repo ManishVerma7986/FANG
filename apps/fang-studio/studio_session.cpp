@@ -111,11 +111,13 @@ StudioSessionController::StudioSessionController(
     std::shared_ptr<StudioInputRouter> input_router,
     std::shared_ptr<AdbInputDispatcher> input_dispatcher,
     std::shared_ptr<StudioVideoConsumer> video_consumer,
-    std::shared_ptr<SharedMemoryVideoTransport> video_transport)
+    std::shared_ptr<SharedMemoryVideoTransport> video_transport,
+    std::shared_ptr<InputMappingEngine> mapping_engine)
     : input_router_(std::move(input_router)),
       input_dispatcher_(std::move(input_dispatcher)),
       video_consumer_(std::move(video_consumer)),
-      video_transport_(std::move(video_transport)) {}
+      video_transport_(std::move(video_transport)),
+      mapping_engine_(std::move(mapping_engine)) {}
 
 StudioSessionController::~StudioSessionController() {
     notify_shutdown();
@@ -131,6 +133,9 @@ void StudioSessionController::notify_shutdown() {
         input_router_->set_guest_ready(false);
         input_router_->set_adb_serial("");
         input_router_->clear_queue();
+    }
+    if (mapping_engine_) {
+        mapping_engine_->reset_all_state();
     }
     if (video_transport_) {
         video_transport_->stop();
@@ -160,6 +165,9 @@ void StudioSessionController::handle_session_change(const fang::broker::RuntimeS
         input_router_->set_guest_ready(false);
         input_router_->set_adb_serial("");
         input_router_->clear_queue();
+    }
+    if (mapping_engine_) {
+        mapping_engine_->reset_all_state();
     }
 
     // Release existing video transport and purge stale frames

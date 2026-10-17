@@ -9,6 +9,7 @@
 #include "adb_input_dispatcher.hpp"
 #include "video_transport.hpp"
 #include "viewport_renderer.hpp"
+#include "input_mapping_engine.hpp"
 
 #include <memory>
 #include <mutex>
@@ -123,11 +124,15 @@ public:
         std::shared_ptr<StudioInputRouter> input_router,
         std::shared_ptr<AdbInputDispatcher> input_dispatcher,
         std::shared_ptr<StudioVideoConsumer> video_consumer,
-        std::shared_ptr<SharedMemoryVideoTransport> video_transport);
+        std::shared_ptr<SharedMemoryVideoTransport> video_transport,
+        std::shared_ptr<InputMappingEngine> mapping_engine = nullptr);
     ~StudioSessionController();
 
     StudioSessionController(const StudioSessionController&) = delete;
     StudioSessionController& operator=(const StudioSessionController&) = delete;
+
+    std::shared_ptr<InputMappingEngine> mapping_engine() const noexcept { return mapping_engine_; }
+    void set_mapping_engine(std::shared_ptr<InputMappingEngine> engine) noexcept { mapping_engine_ = std::move(engine); }
 
     StudioSessionSnapshot update(
         const SupervisorRuntimeSnapshot& supervisor_snapshot,
@@ -146,6 +151,7 @@ private:
     std::shared_ptr<AdbInputDispatcher> input_dispatcher_;
     std::shared_ptr<StudioVideoConsumer> video_consumer_;
     std::shared_ptr<SharedMemoryVideoTransport> video_transport_;
+    std::shared_ptr<InputMappingEngine> mapping_engine_;
 
     mutable std::mutex mutex_;
     StudioSessionSnapshot snapshot_;

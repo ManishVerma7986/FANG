@@ -223,6 +223,54 @@ InputRoutingResult StudioInputRouter::route_key_down(WPARAM vkey) {
     return enqueue_or_dispatch(event);
 }
 
+InputRoutingResult StudioInputRouter::route_mapped_action(const MappedAction& action, DisplayDimensions /*display*/) {
+    switch (action.type) {
+    case MappedActionType::AndroidKey: {
+        if (!action.is_down) {
+            return InputRoutingResult::Success;
+        }
+        InputEvent event;
+        event.type = InputEventType::Key;
+        event.keycode = action.android_keycode;
+        return enqueue_or_dispatch(event);
+    }
+    case MappedActionType::DirectionalMovement: {
+        if (!action.is_down) {
+            return InputRoutingResult::Success;
+        }
+        int keycode = 19; // KEYCODE_DPAD_UP
+        switch (action.direction) {
+        case MovementDirection::Up: keycode = 19; break;
+        case MovementDirection::Down: keycode = 20; break;
+        case MovementDirection::Left: keycode = 21; break;
+        case MovementDirection::Right: keycode = 22; break;
+        }
+        InputEvent event;
+        event.type = InputEventType::Key;
+        event.keycode = keycode;
+        return enqueue_or_dispatch(event);
+    }
+    case MappedActionType::TouchContact: {
+        InputEvent event;
+        event.x = action.guest_x;
+        event.y = action.guest_y;
+        if (action.touch_transition == TouchTransition::Down) {
+            event.type = InputEventType::TouchDown;
+        } else if (action.touch_transition == TouchTransition::Move) {
+            event.type = InputEventType::TouchMove;
+        } else {
+            event.type = InputEventType::TouchUp;
+        }
+        return enqueue_or_dispatch(event);
+    }
+    case MappedActionType::PointerAim:
+    case MappedActionType::AimModeToggle:
+    case MappedActionType::CustomAction:
+        return InputRoutingResult::Success;
+    }
+    return InputRoutingResult::Success;
+}
+
 std::size_t StudioInputRouter::queued_event_count() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return queue_.size();

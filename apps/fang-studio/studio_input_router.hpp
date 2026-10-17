@@ -13,6 +13,8 @@
 #include <string_view>
 #include <vector>
 
+#include "input_mapping_types.hpp"
+
 namespace fang::studio {
 
 enum class InputEventType {
@@ -94,6 +96,7 @@ public:
     InputRoutingResult route_pointer_drag(POINT start_pt, POINT end_pt, RECT client_rect,
         int duration_ms = 100, DisplayDimensions display = {});
     InputRoutingResult route_key_down(WPARAM vkey);
+    InputRoutingResult route_mapped_action(const MappedAction& action, DisplayDimensions display = {});
 
     std::size_t queued_event_count() const;
     std::size_t dropped_event_count() const;
