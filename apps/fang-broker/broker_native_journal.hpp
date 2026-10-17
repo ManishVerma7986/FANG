@@ -52,6 +52,12 @@ public:
 
 private:
     friend class OwnershipSupervisor;
+    // Supervisor-only: persists the verified-empty tombstone after the caller
+    // has already obtained a native-backed EmptyVerified RecoveryDecision.
+    // Never exposed through IOwnershipJournal; direct tombstone writes via
+    // mark_empty_verified() fail closed.
+    bool write_verified_empty_tombstone(const CanonicalAvdIdentity& identity,
+        std::string_view generation_id, std::string& error);
     bool claim_identity(const CanonicalAvdIdentity& identity,
         std::string_view generation_id, std::string& error);
     bool mark_identity_owned(const CanonicalAvdIdentity& identity,

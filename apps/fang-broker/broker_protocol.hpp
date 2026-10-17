@@ -13,7 +13,7 @@
 
 namespace fang::broker {
 
-inline constexpr std::uint16_t protocol_version = 1;
+inline constexpr std::uint16_t protocol_version = 2;
 inline constexpr std::size_t wire_header_size = 20;
 inline constexpr std::size_t maximum_payload_size = 4096;
 inline constexpr std::size_t maximum_wire_message_size = wire_header_size + maximum_payload_size;
@@ -26,7 +26,99 @@ enum class RequestType : std::uint16_t {
     ReserveIdentity = 5,
     ReleaseReservation = 6,
     FinalizeEmpty = 7,
-    ShutdownOwner = 8
+    ShutdownOwner = 8,
+    StartReferenceRuntime = 9,
+    QueryRuntimeStatus = 10,
+    ShutdownRuntime = 11
+};
+
+inline constexpr std::uint16_t reference_runtime_configuration_version = 1;
+
+enum class RuntimeLifecycleState : std::uint8_t {
+    Stopped,
+    Starting,
+    ProcessCreated,
+    OwnershipVerified,
+    GuestBooting,
+    Ready,
+    Stopping,
+    RecoveryRequired,
+    Failed
+};
+
+enum class RuntimeFailureStage : std::uint16_t {
+    None,
+    ValidateConfiguration,
+    ResolveSdk,
+    ResolveAvd,
+    CheckAdbPort,
+    CreateJob,
+    CreateProcess,
+    VerifyOwnership,
+    AdbTransport,
+    GuestBoot,
+    Shutdown,
+    Finalize,
+    Unknown
+};
+
+inline constexpr std::string_view runtime_lifecycle_name(RuntimeLifecycleState state) noexcept {
+    switch (state) {
+    case RuntimeLifecycleState::Stopped: return "Stopped";
+    case RuntimeLifecycleState::Starting: return "Starting";
+    case RuntimeLifecycleState::ProcessCreated: return "Process created";
+    case RuntimeLifecycleState::OwnershipVerified: return "Ownership verified";
+    case RuntimeLifecycleState::GuestBooting: return "Guest booting";
+    case RuntimeLifecycleState::Ready: return "Ready";
+    case RuntimeLifecycleState::Stopping: return "Stopping";
+    case RuntimeLifecycleState::RecoveryRequired: return "Recovery required";
+    case RuntimeLifecycleState::Failed: return "Failed";
+    }
+    return "Unknown";
+}
+
+inline constexpr std::string_view runtime_failure_stage_name(RuntimeFailureStage stage) noexcept {
+    switch (stage) {
+    case RuntimeFailureStage::None: return "None";
+    case RuntimeFailureStage::ValidateConfiguration: return "ValidateConfiguration";
+    case RuntimeFailureStage::ResolveSdk: return "ResolveSdk";
+    case RuntimeFailureStage::ResolveAvd: return "ResolveAvd";
+    case RuntimeFailureStage::CheckAdbPort: return "CheckAdbPort";
+    case RuntimeFailureStage::CreateJob: return "CreateJob";
+    case RuntimeFailureStage::CreateProcess: return "CreateProcess";
+    case RuntimeFailureStage::VerifyOwnership: return "VerifyOwnership";
+    case RuntimeFailureStage::AdbTransport: return "AdbTransport";
+    case RuntimeFailureStage::GuestBoot: return "GuestBoot";
+    case RuntimeFailureStage::Shutdown: return "Shutdown";
+    case RuntimeFailureStage::Finalize: return "Finalize";
+    case RuntimeFailureStage::Unknown: return "Unknown";
+    }
+    return "Unknown";
+}
+
+struct StartReferenceRuntimeRequest {
+    std::uint16_t configuration_version{reference_runtime_configuration_version};
+    std::string avd_name;
+};
+
+struct RuntimeGenerationRequest {
+    std::string generation_id;
+};
+
+struct RuntimeStatusData {
+    std::uint16_t schema_version{1};
+    RuntimeLifecycleState state{RuntimeLifecycleState::Stopped};
+    RuntimeFailureStage failure_stage{RuntimeFailureStage::None};
+    bool guest_ready{};
+    std::uint32_t process_id{};
+    std::uint64_t process_creation_time{};
+    std::uint32_t active_process_count{};
+    std::uint32_t native_error{};
+    std::uint64_t elapsed_ms{};
+    std::string generation_id;
+    std::string avd_name;
+    std::string adb_serial;
+    std::string diagnostic;
 };
 
 enum class ProtocolError : std::uint16_t {
@@ -54,7 +146,12 @@ enum class BrokerErrorCode : std::uint16_t {
     Busy,
     InvalidState,
     RecoveryRequired,
-    StoreNotInitialized
+    StoreNotInitialized,
+    InvalidRuntimeConfiguration,
+    RuntimeAlreadyExists,
+    RuntimeNotFound,
+    RuntimeStartFailed,
+    RuntimeShutdownFailed
 };
 
 enum class LifecycleState : std::uint8_t {
@@ -91,6 +188,7 @@ struct BrokerReply {
     BrokerErrorCode error{BrokerErrorCode::None};
     LifecycleState state{LifecycleState::Starting};
     std::string message;
+    std::vector<std::byte> data;
 };
 
 struct ReplyParseResult {
@@ -99,6 +197,18 @@ struct ReplyParseResult {
     std::uint64_t request_id{};
     bool has_request_id{};
 };
+
+std::vector<std::byte> encode_start_reference_runtime_request(
+    const StartReferenceRuntimeRequest& request);
+std::optional<StartReferenceRuntimeRequest> decode_start_reference_runtime_request(
+    std::span<const std::byte> payload);
+std::vector<std::byte> encode_runtime_generation_request(
+    const RuntimeGenerationRequest& request);
+std::optional<RuntimeGenerationRequest> decode_runtime_generation_request(
+    std::span<const std::byte> payload);
+std::vector<std::byte> encode_runtime_status_data(const RuntimeStatusData& status);
+std::optional<RuntimeStatusData> decode_runtime_status_data(
+    std::span<const std::byte> payload);
 
 std::array<std::byte, wire_header_size> encode_request_header(const Request& request) noexcept;
 std::vector<std::byte> encode_request(const Request& request);

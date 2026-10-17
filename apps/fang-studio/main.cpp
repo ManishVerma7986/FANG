@@ -5,14 +5,21 @@
 #include "capabilities.hpp"
 #include "logger.hpp"
 #include "runtime_backend.hpp"
+#include "supervisor_runtime_client.hpp"
+#include "broker_pipe.hpp"
 #include "service_host.hpp"
 
 #include <algorithm>
+#include <array>
 #include <iterator>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <string_view>
+
+#include "player_viewport.hpp"
+#include "studio_input_router.hpp"
+#include "video_transport.hpp"
 
 namespace {
 
@@ -24,15 +31,17 @@ constexpr int stop_player_button_id = 1004;
 constexpr int restart_player_button_id = 1005;
 constexpr int open_player_button_id = 1006;
 constexpr int avd_combo_id = 1007;
+constexpr int player_viewport_id = 2000;
 constexpr UINT runtime_timer_id = 1;
 
 enum class ControlId : int {
     Title = 1100,
-    CoreStatus,
-    RuntimeStatus,
-    Capabilities,
-    Log,
-    AvdLabel
+    CoreStatus = 1101,
+    RuntimeStatus = 1102,
+    Capabilities = 1103,
+    Log = 1104,
+    AvdLabel = 1105,
+    ViewportHeader = 1106
 };
 
 class StudioCoreService final : public fang::core::IService {
@@ -61,8 +70,13 @@ struct StudioApp {
     fang::core::ServiceHost services;
     fang::core::CapabilityRegistry capabilities;
     fang::studio::EmulatorInstallation emulator;
-    std::unique_ptr<fang::studio::RuntimeBackend> runtime;
+    std::unique_ptr<fang::studio::SupervisorRuntimeClient> runtime;
+    std::shared_ptr<fang::studio::StudioInputRouter> input_router;
+    std::shared_ptr<fang::studio::StudioVideoConsumer> video_consumer;
+    std::shared_ptr<fang::studio::SharedMemoryVideoTransport> video_transport;
+    std::unique_ptr<fang::studio::PlayerViewport> player_viewport;
     std::string initialization_error;
+    std::string runtime_initialization_error;
     bool close_when_stopped{};
     bool close_failure_prompted{};
     HWND title{};
@@ -78,12 +92,30 @@ struct StudioApp {
     HWND stop_player_button{};
     HWND restart_player_button{};
     HWND open_player_button{};
+    HWND viewport_header{};
 
     StudioApp() : logger(log_buffer, fang::core::LogLevel::Trace) {
+        input_router = std::make_shared<fang::studio::StudioInputRouter>();
+        video_consumer = std::make_shared<fang::studio::StudioVideoConsumer>(2);
+        video_transport = std::make_shared<fang::studio::SharedMemoryVideoTransport>(video_consumer);
         emulator = fang::studio::discover_android_emulator();
-        if (emulator.error.empty()) {
-            runtime = std::make_unique<fang::studio::RuntimeBackend>(
-                fang::studio::create_windows_emulator_process());
+        const auto identity = fang::broker::current_user_identity();
+        if (!identity.succeeded) {
+            runtime_initialization_error = identity.error.message;
+        } else {
+            std::array<wchar_t, 32768> module_path{};
+            const DWORD length = GetModuleFileNameW(nullptr, module_path.data(),
+                static_cast<DWORD>(module_path.size()));
+            if (length == 0 || length >= module_path.size()) {
+                runtime_initialization_error = "Could not resolve the Fang Studio executable path.";
+            } else {
+                const auto supervisor_executable = std::filesystem::path(
+                    std::wstring(module_path.data(), length)).parent_path() /
+                    L"fang-runtime-supervisor.exe";
+                runtime = std::make_unique<fang::studio::SupervisorRuntimeClient>(
+                    fang::broker::supervisor_pipe_name_for_user(identity.identity.sid),
+                    supervisor_executable);
+            }
         }
 
         for (const auto name : {"android.guest_boot", "guest.graphics_integration"}) {
@@ -148,21 +180,31 @@ HWND create_control(HWND parent, const wchar_t* class_name, const wchar_t* text,
         nullptr);
 }
 
+using fang::broker::runtime_lifecycle_name;
+
 void update_view(StudioApp& app) {
     const auto core_text = "Core services: " + std::string(lifecycle_name(app.services.state()));
     SetWindowTextW(app.core_status, to_wide(core_text).c_str());
     std::string runtime_text;
+    const auto snapshot = app.runtime == nullptr
+        ? fang::studio::SupervisorRuntimeSnapshot{}
+        : app.runtime->snapshot();
     if (app.runtime == nullptr) {
-        runtime_text = "Android Emulator unavailable: " + app.emulator.error;
+        runtime_text = "Supervisor client unavailable: " + app.runtime_initialization_error;
     } else {
         const auto selected = SendMessageW(app.avd_combo, CB_GETCURSEL, 0, 0);
-        runtime_text = "Android Emulator: " + fang::studio::runtime_state_name(app.runtime->status().state);
-        if (selected == CB_ERR) {
-            runtime_text += " — select an installed AVD.";
-        } else if (!app.runtime->status().message.empty() &&
-            app.runtime->status().message != fang::studio::runtime_state_name(app.runtime->status().state)) {
-            runtime_text += " — " + app.runtime->status().message;
+        runtime_text = "Reference Android Emulator: " +
+            std::string(runtime_lifecycle_name(snapshot.runtime.state));
+        if (selected == CB_ERR) runtime_text += " | select an installed AVD";
+        if (!snapshot.runtime.avd_name.empty()) runtime_text += " | AVD=" + snapshot.runtime.avd_name;
+        if (!snapshot.runtime.adb_serial.empty()) runtime_text += " | " + snapshot.runtime.adb_serial;
+        if (snapshot.runtime.process_id != 0) {
+            runtime_text += " | PID=" + std::to_string(snapshot.runtime.process_id);
         }
+        if (snapshot.runtime.elapsed_ms != 0) {
+            runtime_text += " | " + std::to_string(snapshot.runtime.elapsed_ms) + " ms";
+        }
+        if (!snapshot.message.empty()) runtime_text += " | " + snapshot.message;
     }
     SetWindowTextW(app.runtime_status, to_wide(runtime_text).c_str());
 
@@ -175,7 +217,8 @@ void update_view(StudioApp& app) {
     if (!app.initialization_error.empty()) {
         capability_text << "Core initialization error: " << app.initialization_error << "\r\n";
     }
-    capability_text << "Player mode: external Android Emulator window; display embedding and guest boot verification are not implemented.\r\n";
+    capability_text << "Reference mode: external Android Emulator window; display embedding and guest boot verification are not implemented.\r\n";
+    capability_text << "Stage 2C: Embedded player presentation viewport and coordinate-mapped input forwarding are active.\r\n";
     SetWindowTextW(app.capability_list, to_wide(capability_text.str()).c_str());
 
     SetWindowTextW(app.log_view, to_wide(app.log_buffer.str()).c_str());
@@ -186,47 +229,89 @@ void update_view(StudioApp& app) {
     EnableWindow(app.start_button, state == fang::core::LifecycleState::Created && app.initialization_error.empty());
     EnableWindow(app.stop_button, state == fang::core::LifecycleState::Running || state == fang::core::LifecycleState::Failed);
     const auto selected = app.avd_combo != nullptr && SendMessageW(app.avd_combo, CB_GETCURSEL, 0, 0) != CB_ERR;
-    const auto runtime_state = app.runtime == nullptr ? fang::studio::RuntimeState::Failed : app.runtime->status().state;
-    const auto runtime_active = runtime_state == fang::studio::RuntimeState::Starting ||
-        runtime_state == fang::studio::RuntimeState::Running || runtime_state == fang::studio::RuntimeState::Stopping;
+    const auto runtime_state = snapshot.runtime.state;
+    const auto runtime_active = runtime_state != fang::broker::RuntimeLifecycleState::Stopped &&
+        runtime_state != fang::broker::RuntimeLifecycleState::Failed;
     EnableWindow(app.avd_combo, app.runtime != nullptr && !runtime_active);
-    EnableWindow(app.start_player_button, app.runtime != nullptr && selected &&
-        (runtime_state == fang::studio::RuntimeState::Stopped || runtime_state == fang::studio::RuntimeState::Failed));
-    EnableWindow(app.stop_player_button, app.runtime != nullptr &&
-        (runtime_active || runtime_state == fang::studio::RuntimeState::Failed));
-    EnableWindow(app.restart_player_button, app.runtime != nullptr && selected &&
-        (runtime_state == fang::studio::RuntimeState::Stopped || runtime_state == fang::studio::RuntimeState::Starting ||
-         runtime_state == fang::studio::RuntimeState::Running || runtime_state == fang::studio::RuntimeState::Failed));
-    EnableWindow(app.open_player_button, app.runtime != nullptr && runtime_state == fang::studio::RuntimeState::Running);
+    EnableWindow(app.start_player_button, app.runtime != nullptr && selected && !snapshot.request_pending &&
+        (runtime_state == fang::broker::RuntimeLifecycleState::Stopped || runtime_state == fang::broker::RuntimeLifecycleState::Failed));
+    EnableWindow(app.stop_player_button, app.runtime != nullptr && !snapshot.request_pending &&
+        runtime_state != fang::broker::RuntimeLifecycleState::Stopped);
+    EnableWindow(app.restart_player_button, app.runtime != nullptr && selected && !snapshot.request_pending &&
+        runtime_state != fang::broker::RuntimeLifecycleState::RecoveryRequired &&
+        runtime_state != fang::broker::RuntimeLifecycleState::Stopping);
+    EnableWindow(app.open_player_button, app.runtime != nullptr &&
+        (runtime_state == fang::broker::RuntimeLifecycleState::Ready ||
+         runtime_state == fang::broker::RuntimeLifecycleState::OwnershipVerified));
+
+    if (app.player_viewport != nullptr) {
+        app.player_viewport->update_runtime_state(snapshot.runtime, snapshot.request_pending);
+    }
+
+    if (snapshot.runtime.state == fang::broker::RuntimeLifecycleState::Ready && snapshot.runtime.guest_ready) {
+        if (app.video_transport &&
+            (app.video_transport->state() == fang::studio::VideoTransportState::Disconnected ||
+             app.video_transport->state() == fang::studio::VideoTransportState::Closed ||
+             app.video_transport->state() == fang::studio::VideoTransportState::Error)) {
+            const auto endpoint = fang::studio::shared_memory_name_for_serial(snapshot.runtime.adb_serial);
+            if (endpoint.has_value()) {
+                app.video_transport->start(*endpoint);
+            }
+        }
+    } else if (app.video_transport &&
+               app.video_transport->state() != fang::studio::VideoTransportState::Disconnected &&
+               app.video_transport->state() != fang::studio::VideoTransportState::Closed) {
+        app.video_transport->stop();
+    }
 }
 
 void layout_controls(StudioApp& app, int width, int height) {
-    constexpr int margin = 16;
-    constexpr int title_height = 28;
+    constexpr int margin = 14;
+    constexpr int title_height = 26;
     constexpr int row_height = 26;
-    constexpr int button_width = 100;
-    const int content_width = std::max(0, width - margin * 2);
-    const int top = 12;
+    constexpr int button_width = 90;
+    const int top = 10;
 
-    MoveWindow(app.title, margin, top, content_width, title_height, TRUE);
-    MoveWindow(app.core_status, margin, top + title_height + 4, content_width - button_width * 2 - 16, row_height, TRUE);
-    MoveWindow(app.start_button, width - margin - button_width * 2 - 8, top + title_height, button_width, row_height, TRUE);
-    MoveWindow(app.stop_button, width - margin - button_width, top + title_height, button_width, row_height, TRUE);
-    const int runtime_top = top + title_height + row_height + 10;
-    MoveWindow(app.runtime_status, margin, runtime_top, content_width, row_height, TRUE);
-    MoveWindow(app.avd_label, margin, runtime_top + row_height + 6, 36, row_height, TRUE);
-    MoveWindow(app.avd_combo, margin + 40, runtime_top + row_height + 4, 270, 240, TRUE);
-    MoveWindow(app.start_player_button, margin + 320, runtime_top + row_height + 4, 88, row_height, TRUE);
-    MoveWindow(app.stop_player_button, margin + 414, runtime_top + row_height + 4, 80, row_height, TRUE);
-    MoveWindow(app.restart_player_button, margin + 500, runtime_top + row_height + 4, 88, row_height, TRUE);
-    MoveWindow(app.open_player_button, margin + 594, runtime_top + row_height + 4, 96, row_height, TRUE);
+    // Allocate two columns if window is wide enough (>= 800px)
+    const bool split = width >= 800;
+    const int left_width = split ? std::max(480, std::min(540, width - 360)) : std::max(0, width - margin * 2);
 
-    const int capability_top = runtime_top + row_height * 2 + 20;
-    const int capability_height = 90;
-    MoveWindow(app.capability_list, margin, capability_top, content_width, capability_height, TRUE);
+    MoveWindow(app.title, margin, top, left_width, title_height, TRUE);
+    MoveWindow(app.core_status, margin, top + title_height + 4, left_width - button_width * 2 - 16, row_height, TRUE);
+    MoveWindow(app.start_button, margin + left_width - button_width * 2 - 8, top + title_height, button_width, row_height, TRUE);
+    MoveWindow(app.stop_button, margin + left_width - button_width, top + title_height, button_width, row_height, TRUE);
 
-    const int log_top = capability_top + capability_height + 12;
-    MoveWindow(app.log_view, margin, log_top, content_width, std::max(80, height - log_top - margin), TRUE);
+    const int runtime_top = top + title_height + row_height + 8;
+    MoveWindow(app.runtime_status, margin, runtime_top, left_width, row_height, TRUE);
+    MoveWindow(app.avd_label, margin, runtime_top + row_height + 6, 32, row_height, TRUE);
+    MoveWindow(app.avd_combo, margin + 36, runtime_top + row_height + 4, 180, 240, TRUE);
+    MoveWindow(app.start_player_button, margin + 222, runtime_top + row_height + 4, 66, row_height, TRUE);
+    MoveWindow(app.stop_player_button, margin + 292, runtime_top + row_height + 4, 62, row_height, TRUE);
+    MoveWindow(app.restart_player_button, margin + 358, runtime_top + row_height + 4, 68, row_height, TRUE);
+    MoveWindow(app.open_player_button, margin + 430, runtime_top + row_height + 4, 62, row_height, TRUE);
+
+    const int capability_top = runtime_top + row_height * 2 + 16;
+    const int capability_height = 80;
+    MoveWindow(app.capability_list, margin, capability_top, left_width, capability_height, TRUE);
+
+    const int log_top = capability_top + capability_height + 10;
+    MoveWindow(app.log_view, margin, log_top, left_width, std::max(80, height - log_top - margin), TRUE);
+
+    if (split) {
+        const int right_left = margin + left_width + margin;
+        const int right_width = std::max(120, width - right_left - margin);
+        MoveWindow(app.viewport_header, right_left, top, right_width, title_height, TRUE);
+        if (app.player_viewport != nullptr) {
+            app.player_viewport->show(true);
+            app.player_viewport->move(right_left, top + title_height + 2, right_width,
+                std::max(100, height - top - title_height - margin - 2), TRUE);
+        }
+    } else {
+        MoveWindow(app.viewport_header, 0, 0, 0, 0, FALSE);
+        if (app.player_viewport != nullptr) {
+            app.player_viewport->show(false);
+        }
+    }
 }
 
 LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM w_param, LPARAM l_param) {
@@ -255,12 +340,16 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM w_param, LPA
         app->start_player_button = create_control(window, L"BUTTON", L"Start", WS_TABSTOP | BS_PUSHBUTTON, start_player_button_id);
         app->stop_player_button = create_control(window, L"BUTTON", L"Stop", WS_TABSTOP | BS_PUSHBUTTON, stop_player_button_id);
         app->restart_player_button = create_control(window, L"BUTTON", L"Restart", WS_TABSTOP | BS_PUSHBUTTON, restart_player_button_id);
-        app->open_player_button = create_control(window, L"BUTTON", L"Open Player", WS_TABSTOP | BS_PUSHBUTTON, open_player_button_id);
+        app->open_player_button = create_control(window, L"BUTTON", L"Open", WS_TABSTOP | BS_PUSHBUTTON, open_player_button_id);
+        app->viewport_header = create_control(window, L"STATIC", L"Player Viewport (Stage 2D)", SS_LEFT, static_cast<int>(ControlId::ViewportHeader));
+
+        app->player_viewport = std::make_unique<fang::studio::PlayerViewport>(
+            window, GetModuleHandleW(nullptr), player_viewport_id, app->input_router, app->video_consumer);
 
         const auto font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
         for (const auto control : {app->title, app->core_status, app->runtime_status, app->avd_label, app->avd_combo,
                  app->capability_list, app->log_view, app->start_button, app->stop_button, app->start_player_button,
-                 app->stop_player_button, app->restart_player_button, app->open_player_button}) {
+                 app->stop_player_button, app->restart_player_button, app->open_player_button, app->viewport_header}) {
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         }
         for (const auto& avd_name : app->emulator.avd_names) {
@@ -311,37 +400,76 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM w_param, LPA
             update_view(*app);
             return 0;
         }
+        if (LOWORD(w_param) == open_player_button_id) {
+            if (app->runtime != nullptr) {
+                const auto snapshot = app->runtime->snapshot();
+                if (snapshot.runtime.process_id != 0) {
+                    struct SearchState {
+                        DWORD pid{};
+                        HWND hwnd{};
+                    } search{snapshot.runtime.process_id, nullptr};
+
+                    EnumWindows([](HWND candidate, LPARAM param) -> BOOL {
+                        auto* state = reinterpret_cast<SearchState*>(param);
+                        DWORD pid{};
+                        GetWindowThreadProcessId(candidate, &pid);
+                        if (pid == state->pid && IsWindowVisible(candidate)) {
+                            state->hwnd = candidate;
+                            return FALSE;
+                        }
+                        return TRUE;
+                    }, reinterpret_cast<LPARAM>(&search));
+
+                    if (search.hwnd != nullptr) {
+                        ShowWindow(search.hwnd, SW_RESTORE);
+                        SetForegroundWindow(search.hwnd);
+                    }
+                }
+            }
+            static_cast<void>(app->logger.write(fang::core::LogLevel::Info, "player_window",
+                "android-emulator-reference", "Focused the standalone Android Emulator window."));
+            update_view(*app);
+            return 0;
+        }
         if (LOWORD(w_param) == start_player_button_id || LOWORD(w_param) == stop_player_button_id ||
-            LOWORD(w_param) == restart_player_button_id || LOWORD(w_param) == open_player_button_id) {
+            LOWORD(w_param) == restart_player_button_id) {
             if (app->runtime == nullptr) {
                 update_view(*app);
                 return 0;
             }
-            auto result = fang::studio::RuntimeResult::failure("No Android Emulator action was selected.");
             const auto command = LOWORD(w_param);
+            bool accepted{};
+            std::string action_message;
             if (command == start_player_button_id || command == restart_player_button_id) {
                 const auto selected = SendMessageW(app->avd_combo, CB_GETCURSEL, 0, 0);
                 if (selected != CB_ERR && static_cast<std::size_t>(selected) < app->emulator.avd_names.size()) {
-                    const fang::studio::EmulatorConfig config{
-                        app->emulator.executable,
-                        app->emulator.avd_names[static_cast<std::size_t>(selected)]};
-                    result = command == start_player_button_id
-                        ? app->runtime->start(config)
-                        : app->runtime->restart(config);
+                    const auto& wide_name = app->emulator.avd_names[static_cast<std::size_t>(selected)];
+                    if (wide_name.empty() || std::any_of(wide_name.begin(), wide_name.end(),
+                            [](wchar_t value) { return value <= 0 || value > 0x7f; })) {
+                        action_message = "The selected AVD name is not supported by the reference-runtime protocol.";
+                    } else {
+                        std::string avd_name;
+                        avd_name.reserve(wide_name.size());
+                        for (const wchar_t character : wide_name) {
+                            avd_name.push_back(static_cast<char>(character));
+                        }
+                        accepted = command == start_player_button_id
+                            ? app->runtime->start(std::move(avd_name))
+                            : app->runtime->restart(std::move(avd_name));
+                        if (!accepted) action_message = "A runtime request is already pending or the current state is not safe for this action.";
+                    }
                 } else {
-                    result = fang::studio::RuntimeResult::failure("Select an installed AVD before starting the Android Emulator.");
+                    action_message = "Select an installed AVD before starting the reference runtime.";
                 }
-            } else if (command == stop_player_button_id) {
-                result = app->runtime->stop();
             } else {
-                result = app->runtime->open_player();
+                accepted = app->runtime->shutdown();
+                if (!accepted) action_message = "A shutdown request is already pending or the runtime is already stopped.";
             }
-            if (!result.message.empty()) {
+            if (!action_message.empty()) {
                 static_cast<void>(app->logger.write(
-                    result.succeeded ? fang::core::LogLevel::Info : fang::core::LogLevel::Error,
-                    result.succeeded ? "runtime_action" : "runtime_action_failed",
-                    "android-emulator-reference",
-                    result.message));
+                    accepted ? fang::core::LogLevel::Info : fang::core::LogLevel::Error,
+                    accepted ? "runtime_action" : "runtime_action_failed",
+                    "android-emulator-reference", action_message));
             }
             update_view(*app);
             return 0;
@@ -349,18 +477,23 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM w_param, LPA
         break;
     case WM_TIMER:
         if (w_param == runtime_timer_id && app->runtime != nullptr) {
-            app->runtime->poll();
+            const auto snapshot = app->runtime->snapshot();
             update_view(*app);
-            if (app->close_when_stopped && app->runtime->status().state == fang::studio::RuntimeState::Stopped) {
+            if (app->close_when_stopped &&
+                (snapshot.runtime.state == fang::broker::RuntimeLifecycleState::Stopped ||
+                 (snapshot.runtime.state == fang::broker::RuntimeLifecycleState::Failed &&
+                  snapshot.runtime.generation_id.empty() && snapshot.runtime.process_id == 0))) {
                 DestroyWindow(window);
                 return 0;
             }
-            if (app->close_when_stopped && app->runtime->status().state == fang::studio::RuntimeState::Failed &&
+            if (app->close_when_stopped &&
+                (snapshot.runtime.state == fang::broker::RuntimeLifecycleState::Failed ||
+                 snapshot.runtime.state == fang::broker::RuntimeLifecycleState::RecoveryRequired) &&
                 !app->close_failure_prompted) {
                 app->close_failure_prompted = true;
                 MessageBoxW(window,
-                    L"Fang could not confirm that the Emulator process group has exited. Fang will remain open and retain AVD ownership. Retry Stop after reviewing the runtime status.",
-                    L"Android Emulator shutdown unverified", MB_OK | MB_ICONWARNING);
+                    L"Fang could not confirm safe runtime shutdown. The supervisor retains ownership where available. Review the runtime status and retry Stop; Studio will remain open.",
+                    L"Reference runtime shutdown unverified", MB_OK | MB_ICONWARNING);
                 app->close_when_stopped = false;
                 update_view(*app);
             }
@@ -374,14 +507,24 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM w_param, LPA
                 static_cast<void>(app->logger.write_error(result.error()));
             }
         }
-        if (app->runtime != nullptr && app->runtime->status().state != fang::studio::RuntimeState::Stopped) {
-            const auto result = app->runtime->stop();
-            if (!result.succeeded) {
-                MessageBoxW(window, to_wide(result.message).c_str(), L"Android Emulator shutdown failed", MB_OK | MB_ICONERROR);
+        if (app->runtime != nullptr) {
+            const auto snapshot = app->runtime->snapshot();
+            const bool no_runtime = snapshot.runtime.state == fang::broker::RuntimeLifecycleState::Stopped ||
+                (snapshot.runtime.state == fang::broker::RuntimeLifecycleState::Failed &&
+                 snapshot.runtime.generation_id.empty() && snapshot.runtime.process_id == 0);
+            if (no_runtime) {
+                if (app->services.state() == fang::core::LifecycleState::Running ||
+                    app->services.state() == fang::core::LifecycleState::Failed) {
+                    auto result = app->services.stop();
+                    if (!result) static_cast<void>(app->logger.write_error(result.error()));
+                }
+                DestroyWindow(window);
                 return 0;
             }
-            if (app->runtime->status().state == fang::studio::RuntimeState::Stopped) {
-                DestroyWindow(window);
+            if (!app->runtime->shutdown()) {
+                MessageBoxW(window,
+                    L"A shutdown request could not be queued. Review the runtime state before closing Studio.",
+                    L"Reference runtime is still owned", MB_OK | MB_ICONWARNING);
                 return 0;
             }
             app->close_when_stopped = true;
@@ -389,9 +532,20 @@ LRESULT CALLBACK window_procedure(HWND window, UINT message, WPARAM w_param, LPA
             update_view(*app);
             return 0;
         }
+        if (app->services.state() == fang::core::LifecycleState::Running ||
+            app->services.state() == fang::core::LifecycleState::Failed) {
+            auto result = app->services.stop();
+            if (!result) static_cast<void>(app->logger.write_error(result.error()));
+        }
         DestroyWindow(window);
         return 0;
     case WM_DESTROY:
+        if (app != nullptr) {
+            if (app->video_transport != nullptr) {
+                app->video_transport->stop();
+            }
+            app->player_viewport.reset();
+        }
         KillTimer(window, runtime_timer_id);
         PostQuitMessage(0);
         return 0;
@@ -425,8 +579,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        760,
-        560,
+        960,
+        600,
         nullptr,
         nullptr,
         instance,

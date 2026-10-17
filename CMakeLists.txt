@@ -59,6 +59,7 @@ target_link_libraries(fang_runtime_broker_core PRIVATE fang_warnings)
 
 add_library(fang_runtime_broker_transport STATIC
     apps/fang-broker/broker_pipe.cpp
+    apps/fang-broker/broker_pipe_client.cpp
 )
 target_include_directories(fang_runtime_broker_transport PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-broker"
@@ -70,11 +71,25 @@ target_link_libraries(fang_runtime_broker_transport PRIVATE
     fang_warnings Advapi32
 )
 
-add_library(fang_runtime_broker_native STATIC
+add_library(fang_runtime_supervisor_client STATIC
+    apps/fang-studio/supervisor_runtime_client.cpp
+)
+target_include_directories(fang_runtime_supervisor_client PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-studio"
+)
+target_link_libraries(fang_runtime_supervisor_client PUBLIC
+    fang_runtime_broker_transport
+)
+target_link_libraries(fang_runtime_supervisor_client PRIVATE fang_warnings Advapi32)
+
+set(FANG_RUNTIME_BROKER_NATIVE_SOURCES
     apps/fang-broker/broker_native_job.cpp
     apps/fang-broker/broker_native_journal.cpp
+    apps/fang-broker/broker_reference_runtime.cpp
     apps/fang-broker/broker_supervisor.cpp
+    apps/fang-broker/broker_supervisor_runtime.cpp
 )
+add_library(fang_runtime_broker_native STATIC ${FANG_RUNTIME_BROKER_NATIVE_SOURCES})
 target_include_directories(fang_runtime_broker_native PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-broker"
 )
@@ -87,8 +102,12 @@ target_link_libraries(fang_runtime_broker_native PRIVATE
 
 add_executable(fang-studio WIN32
     apps/fang-studio/main.cpp
+    apps/fang-studio/player_viewport.cpp
+    apps/fang-studio/studio_input_router.cpp
+    apps/fang-studio/video_transport.cpp
 )
-target_link_libraries(fang-studio PRIVATE fang_core fang_runtime fang_warnings User32 Gdi32)
+target_link_libraries(fang-studio PRIVATE fang_core fang_runtime fang_runtime_supervisor_client
+    fang_warnings User32 Gdi32)
 target_compile_definitions(fang-studio PRIVATE UNICODE _UNICODE)
 
 add_executable(fang-runtime-broker
@@ -151,15 +170,78 @@ if(BUILD_TESTING)
     target_compile_definitions(fang-runtime-broker-native-tests PRIVATE UNICODE _UNICODE)
     add_test(NAME runtime-broker-native-unit COMMAND fang-runtime-broker-native-tests)
 
+    add_library(fang_runtime_broker_native_test STATIC ${FANG_RUNTIME_BROKER_NATIVE_SOURCES})
+    target_include_directories(fang_runtime_broker_native_test PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-broker"
+    )
+    target_link_libraries(fang_runtime_broker_native_test PUBLIC
+        fang_runtime_broker_core
+    )
+    target_link_libraries(fang_runtime_broker_native_test PRIVATE
+        fang_warnings Advapi32 Bcrypt
+    )
+    target_compile_definitions(fang_runtime_broker_native_test PRIVATE
+        FANG_SUPERVISOR_TEST_SEAM
+    )
+
     add_executable(fang-runtime-supervisor-native-tests
         tests/integration/broker_supervisor_tests.cpp
     )
     target_link_libraries(fang-runtime-supervisor-native-tests PRIVATE
-        fang_runtime_broker_native fang_runtime_broker_transport fang_warnings
+        fang_runtime_broker_native_test fang_runtime_broker_transport
+        fang_runtime_supervisor_client fang_warnings
         Advapi32 Bcrypt
     )
-    target_compile_definitions(fang-runtime-supervisor-native-tests PRIVATE UNICODE _UNICODE)
+    target_compile_definitions(fang-runtime-supervisor-native-tests PRIVATE UNICODE _UNICODE
+        FANG_SUPERVISOR_TEST_SEAM)
     add_test(NAME runtime-supervisor-native-unit COMMAND fang-runtime-supervisor-native-tests)
+    set_tests_properties(runtime-supervisor-native-unit PROPERTIES TIMEOUT 120)
+
+    add_executable(fang-reference-runtime-smoke
+        tests/integration/reference_runtime_smoke.cpp
+    )
+    target_link_libraries(fang-reference-runtime-smoke PRIVATE
+        fang_runtime_broker_native fang_runtime_broker_transport
+        fang_runtime_supervisor_client fang_warnings Advapi32 Bcrypt
+    )
+    target_compile_definitions(fang-reference-runtime-smoke PRIVATE UNICODE _UNICODE)
+
+    add_executable(fang-video-smoke
+        tests/integration/video_smoke_main.cpp
+        tests/integration/video_smoke_runner.cpp
+        apps/fang-studio/video_transport.cpp
+    )
+    target_include_directories(fang-video-smoke PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-broker"
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-studio"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration"
+    )
+    target_link_libraries(fang-video-smoke PRIVATE
+        fang_runtime_broker_native
+        fang_runtime_broker_transport
+        fang_runtime_supervisor_client
+        fang_warnings Advapi32 Bcrypt Rpcrt4 Ws2_32
+    )
+    target_compile_definitions(fang-video-smoke PRIVATE UNICODE _UNICODE)
+
+    add_executable(fang-video-smoke-tests
+        tests/unit/video_smoke_tests.cpp
+        tests/integration/video_smoke_runner.cpp
+        apps/fang-studio/video_transport.cpp
+    )
+    target_include_directories(fang-video-smoke-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-broker"
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-studio"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration"
+    )
+    target_link_libraries(fang-video-smoke-tests PRIVATE
+        fang_runtime_broker_native
+        fang_runtime_broker_transport
+        fang_runtime_supervisor_client
+        fang_warnings Advapi32 Bcrypt Rpcrt4 Ws2_32
+    )
+    target_compile_definitions(fang-video-smoke-tests PRIVATE UNICODE _UNICODE)
+    add_test(NAME video-smoke-offline-unit COMMAND fang-video-smoke-tests)
 
     add_test(NAME host-timing-rejects-zero-duration
         COMMAND fang-host-timing --duration-ms 0
@@ -187,6 +269,38 @@ if(BUILD_TESTING)
     )
     target_link_libraries(fang-studio-window-selection-tests PRIVATE fang_warnings)
     add_test(NAME studio-window-selection-unit COMMAND fang-studio-window-selection-tests)
+
+    add_executable(fang-studio-player-tests
+        tests/unit/studio_player_tests.cpp
+        apps/fang-studio/player_viewport.cpp
+        apps/fang-studio/studio_input_router.cpp
+        apps/fang-studio/video_transport.cpp
+    )
+    target_include_directories(fang-studio-player-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-studio"
+    )
+    target_link_libraries(fang-studio-player-tests PRIVATE
+        fang_core fang_runtime fang_runtime_supervisor_client
+        fang_warnings User32 Gdi32
+    )
+    target_compile_definitions(fang-studio-player-tests PRIVATE UNICODE _UNICODE)
+    add_test(NAME studio-player-unit COMMAND fang-studio-player-tests)
+
+    add_executable(fang-studio-video-tests
+        tests/unit/studio_video_tests.cpp
+        apps/fang-studio/player_viewport.cpp
+        apps/fang-studio/studio_input_router.cpp
+        apps/fang-studio/video_transport.cpp
+    )
+    target_include_directories(fang-studio-video-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-studio"
+    )
+    target_link_libraries(fang-studio-video-tests PRIVATE
+        fang_core fang_runtime fang_runtime_supervisor_client
+        fang_warnings User32 Gdi32
+    )
+    target_compile_definitions(fang-studio-video-tests PRIVATE UNICODE _UNICODE)
+    add_test(NAME studio-video-unit COMMAND fang-studio-video-tests)
 
     find_program(FANG_POWERSHELL_EXECUTABLE NAMES powershell.exe pwsh.exe)
     if(FANG_POWERSHELL_EXECUTABLE)

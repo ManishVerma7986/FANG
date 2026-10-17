@@ -957,6 +957,26 @@ bool NativeOwnershipJournal::write_pending(const RuntimeSessionMetadata& source,
 
 bool NativeOwnershipJournal::mark_empty_verified(const CanonicalAvdIdentity& identity,
         std::string_view generation_id, std::string& error) {
+    // Stage 2B hardening: the production supervisor never calls this overload
+    // in isolation. A journal tombstone alone must never authorize an empty
+    // runtime; only mark_identity_empty() with a native-backed EmptyVerified
+    // RecoveryDecision completes the trusted transition. This overload is kept
+    // only for the legacy IOwnershipJournal interface and fails closed so a
+    // caller cannot manufacture trusted empty state by writing a tombstone.
+    static_cast<void>(identity);
+    static_cast<void>(generation_id);
+    error = "Direct tombstone writes are refused: finalize empty only through "
+        "the supervisor with native-backed EmptyVerified evidence.";
+    return false;
+}
+
+bool NativeOwnershipJournal::write_verified_empty_tombstone(
+        const CanonicalAvdIdentity& identity, std::string_view generation_id,
+        std::string& error) {
+    error.clear();
+    // Supervisor-only helper. The caller (OwnershipSupervisor::finalize_empty)
+    // must already hold a native-backed EmptyVerified RecoveryDecision for
+    // this exact generation; this function only performs the durable write.
     const auto loaded = load(identity);
     if (loaded.state != JournalLoadState::Record || !loaded.record.has_value() ||
         loaded.record->generation_id != generation_id) {

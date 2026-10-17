@@ -102,13 +102,70 @@ void test_protocol_validation_and_reply_shape() {
     require(decode_request(bad_magic).error == ProtocolError::InvalidMagic,
         "A malformed message signature was accepted.");
 
+    const std::vector<std::byte> reply_data{std::byte{0x01}, std::byte{0x02}, std::byte{0x03}};
     const auto reply_bytes = encode_reply(request.request_id,
-        {BrokerErrorCode::None, LifecycleState::Ready, "pong"});
+        {BrokerErrorCode::None, LifecycleState::Ready, "pong", reply_data});
     const auto reply = decode_reply(reply_bytes);
     require(reply.reply.has_value() && reply.error == ProtocolError::None &&
         reply.request_id == request.request_id && reply.reply->message == "pong" &&
-        reply.reply->state == LifecycleState::Ready,
-        "The broker response did not preserve the request identifier and explicit status.");
+        reply.reply->state == LifecycleState::Ready && reply.reply->data == reply_data,
+        "The broker response did not preserve its request identifier, status, and structured data.");
+
+    auto malformed_reply = reply_bytes;
+    write_u32(malformed_reply, wire_header_size + 7, 4);
+    require(decode_reply(malformed_reply).error == ProtocolError::MalformedReply,
+        "A reply with an inconsistent structured-data length was accepted.");
+
+    const StartReferenceRuntimeRequest start_request{
+        reference_runtime_configuration_version, "FANG-StageA-API36-x86_64"};
+    const auto start_payload = encode_start_reference_runtime_request(start_request);
+    const auto decoded_start = decode_start_reference_runtime_request(start_payload);
+    require(decoded_start.has_value() && decoded_start->avd_name == start_request.avd_name,
+        "A valid reference-runtime start request did not round-trip.");
+    auto invalid_avd_payload = start_payload;
+    invalid_avd_payload.back() = std::byte{'/'};
+    require(!decode_start_reference_runtime_request(invalid_avd_payload).has_value(),
+        "A reference-runtime request containing a path separator was accepted.");
+    auto unsupported_config_payload = start_payload;
+    unsupported_config_payload[0] = std::byte{2};
+    require(!decode_start_reference_runtime_request(unsupported_config_payload).has_value(),
+        "An unsupported reference-runtime configuration version was accepted.");
+
+    const RuntimeGenerationRequest generation_request{"01234567-89ab-4cde-8fab-0123456789ab"};
+    const auto generation_payload = encode_runtime_generation_request(generation_request);
+    const auto decoded_generation = decode_runtime_generation_request(generation_payload);
+    require(decoded_generation.has_value() &&
+        decoded_generation->generation_id == generation_request.generation_id,
+        "A valid runtime generation request did not round-trip.");
+    require(!decode_runtime_generation_request(start_payload).has_value(),
+        "A non-generation payload was accepted as a runtime generation request.");
+
+    RuntimeStatusData runtime_status;
+    runtime_status.state = RuntimeLifecycleState::GuestBooting;
+    runtime_status.failure_stage = RuntimeFailureStage::None;
+    runtime_status.process_id = 4200;
+    runtime_status.process_creation_time = 987654321;
+    runtime_status.active_process_count = 2;
+    runtime_status.elapsed_ms = 12000;
+    runtime_status.generation_id = generation_request.generation_id;
+    runtime_status.avd_name = start_request.avd_name;
+    runtime_status.adb_serial = "emulator-5554";
+    runtime_status.diagnostic = "Waiting for sys.boot_completed=1";
+    const auto runtime_status_bytes = encode_runtime_status_data(runtime_status);
+    const auto decoded_runtime_status = decode_runtime_status_data(runtime_status_bytes);
+    require(decoded_runtime_status.has_value() &&
+        decoded_runtime_status->state == RuntimeLifecycleState::GuestBooting &&
+        decoded_runtime_status->process_id == runtime_status.process_id &&
+        decoded_runtime_status->process_creation_time == runtime_status.process_creation_time &&
+        decoded_runtime_status->active_process_count == runtime_status.active_process_count &&
+        decoded_runtime_status->generation_id == runtime_status.generation_id &&
+        decoded_runtime_status->adb_serial == runtime_status.adb_serial &&
+        decoded_runtime_status->diagnostic == runtime_status.diagnostic,
+        "A structured runtime status payload did not round-trip.");
+    auto malformed_runtime_status = runtime_status_bytes;
+    malformed_runtime_status[2] = std::byte{0xff};
+    require(!decode_runtime_status_data(malformed_runtime_status).has_value(),
+        "An unknown runtime lifecycle state was accepted.");
 }
 
 void test_request_id_deduplication_and_lifecycle() {

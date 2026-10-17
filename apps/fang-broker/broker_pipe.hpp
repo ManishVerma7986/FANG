@@ -66,4 +66,21 @@ private:
     std::uint32_t stop_event_error_{};
 };
 
+struct BrokerCallResult {
+    BrokerError transport_error;
+    std::optional<BrokerReply> reply;
+    ProtocolError protocol_error{ProtocolError::None};
+};
+
+class BrokerPipeClient final {
+public:
+    explicit BrokerPipeClient(std::wstring pipe_name,
+        std::uint32_t timeout_ms = 5000);
+    BrokerCallResult call(const Request& request) const;
+
+private:
+    std::wstring pipe_name_;
+    std::uint32_t timeout_ms_{};
+};
+
 }

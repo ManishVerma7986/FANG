@@ -603,12 +603,13 @@ void test_durable_journal_validation_and_atomic_update() {
 
     require(helper.stop_and_wait(),
         "The controlled helper did not stop normally before journal finalization.");
-    require(journal.mark_empty_verified(identity, generation, error),
-        "Could not atomically update the verified-empty journal generation: " + error);
+    error.clear();
+    require(!journal.mark_empty_verified(identity, generation, error) && !error.empty(),
+        "A direct tombstone write bypassed supervisor native verification.");
     loaded = journal.load(identity);
     require(loaded.state == JournalLoadState::Record && loaded.record.has_value() &&
-        loaded.record->phase == RuntimeLaunchPhase::StopRequested,
-        "A journal tombstone was treated as empty without returning a Job generation for native validation.");
+        loaded.record->phase == RuntimeLaunchPhase::Active,
+        "A refused direct tombstone write changed the durable launch phase.");
     const auto empty_decision = assess_recovery(identity, loaded, jobs, membership);
     require(empty_decision.state == RecoveryState::EmptyVerified &&
         empty_decision.reason == RecoveryReason::None &&

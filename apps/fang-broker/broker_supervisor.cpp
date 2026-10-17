@@ -1,8 +1,11 @@
 #include "broker_supervisor.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <sstream>
+#include <string_view>
 #include <utility>
 
 namespace fang::broker {
@@ -50,6 +53,11 @@ bool valid_store(const OwnershipStoreLoadResult& store) {
     return store.state == OwnershipStoreState::Initialized;
 }
 
+bool all_store_entries_empty_verified(const OwnershipStoreLoadResult& store) {
+    return valid_store(store) && std::all_of(store.entries.begin(), store.entries.end(),
+        [](const auto& entry) { return entry.state == OwnershipIndexEntryState::EmptyVerified; });
+}
+
 std::string identity_state_text(RecoveryState state) {
     switch (state) {
     case RecoveryState::EmptyVerified: return "EmptyVerified";
@@ -57,6 +65,40 @@ std::string identity_state_text(RecoveryState state) {
     case RecoveryState::RecoveryRequired: return "RecoveryRequired";
     }
     return "RecoveryRequired";
+}
+
+std::uint64_t monotonic_milliseconds() noexcept {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+void set_runtime_diagnostic(RuntimeStatusData& status, std::string_view diagnostic) {
+    constexpr std::size_t maximum_diagnostic = 1024;
+    status.diagnostic.assign(diagnostic.substr(0, maximum_diagnostic));
+}
+
+bool exact_adb_device_is_ready(std::string_view output, std::string_view serial) {
+    std::istringstream lines{std::string(output)};
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (line.size() <= serial.size() || line.compare(0, serial.size(), serial) != 0 ||
+            (line[serial.size()] != ' ' && line[serial.size()] != '\t')) continue;
+        const auto state_begin = line.find_first_not_of(" \t", serial.size());
+        if (state_begin == std::string::npos) return false;
+        const auto state_end = line.find_first_of(" \t", state_begin);
+        return line.substr(state_begin, state_end - state_begin) == "device";
+    }
+    return false;
+}
+
+bool adb_serial_present(std::string_view output, std::string_view serial) {
+    std::istringstream lines{std::string(output)};
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (line.size() > serial.size() && line.compare(0, serial.size(), serial) == 0 &&
+            (line[serial.size()] == ' ' || line[serial.size()] == '\t')) return true;
+    }
+    return false;
 }
 
 }
@@ -110,11 +152,11 @@ OwnershipSupervisor::OwnershipSupervisor(std::string user_sid, std::uint32_t ses
       owner_generation_id_(std::move(owner_generation_id)), request_ids_(4096),
             journal_(user_sid_, session_id_, process_id_, owner_generation_id_,
                 std::move(storage_root)),
-      jobs_(user_sid_), membership_(user_sid_) {
+            jobs_(user_sid_), native_membership_(user_sid_), membership_(native_membership_) {
     const auto store = journal_.load_store();
     if (store.state == OwnershipStoreState::Missing) {
         lifecycle_ = SupervisorLifecycle::StoreUninitialized;
-    } else if (valid_store(store) && store.entries.empty()) {
+    } else if (all_store_entries_empty_verified(store)) {
         lifecycle_ = SupervisorLifecycle::Ready;
     } else {
         lifecycle_ = SupervisorLifecycle::RecoveryRequired;
@@ -157,6 +199,12 @@ BrokerReply OwnershipSupervisor::dispatch(const Request& request) {
         return reserve_identity(request);
     case RequestType::FinalizeEmpty:
         return finalize_empty(request);
+    case RequestType::StartReferenceRuntime:
+        return start_reference_runtime(request);
+    case RequestType::QueryRuntimeStatus:
+        return query_runtime_status(request);
+    case RequestType::ShutdownRuntime:
+        return shutdown_runtime(request);
     case RequestType::ReleaseReservation:
         return fail_closed(BrokerErrorCode::InvalidState,
             "Reservations cannot be released without native empty-state verification.");
@@ -185,10 +233,10 @@ BrokerReply OwnershipSupervisor::initialize_store(const Request& request) {
             "Authority store initialization failed closed: " + error);
     }
     const auto store = journal_.load_store();
-    lifecycle_ = valid_store(store) && store.entries.empty()
-        ? SupervisorLifecycle::Ready : SupervisorLifecycle::RecoveryRequired;
-    return {BrokerErrorCode::None, LifecycleState::Ready,
-        lifecycle_ == SupervisorLifecycle::Ready
+    const bool ready = all_store_entries_empty_verified(store);
+    lifecycle_ = ready ? SupervisorLifecycle::Ready : SupervisorLifecycle::RecoveryRequired;
+    return {ready ? BrokerErrorCode::None : BrokerErrorCode::RecoveryRequired, LifecycleState::Ready,
+        ready
             ? "Authority store explicitly initialized. This operation does not create a Job or authorize a runtime launch."
             : "Authority store exists but contains prior identity records requiring recovery."};
 }
@@ -281,16 +329,26 @@ BrokerReply OwnershipSupervisor::reserve_identity(const Request& request) {
         }
     }
     auto held = owned_generations_.find(identity.key());
-    if (held != owned_generations_.end() && held->second.job != nullptr &&
-        !held->second.empty_verified) {
-        return fail_closed(BrokerErrorCode::Busy,
-            "This supervisor still holds a Job handle for the identity.");
+    if (held != owned_generations_.end()) {
+        if (held->second.job != nullptr && !held->second.empty_verified) {
+            return fail_closed(BrokerErrorCode::Busy,
+                "This supervisor still holds a Job handle for the identity.");
+        }
+        // A finalized (EmptyVerified) in-memory entry with no live Job handle
+        // is not an outstanding generation: drop it so the next reservation can
+        // start a fresh generation. The durable EmptyVerified tombstone plus
+        // index entry remain and are revalidated below as the replacement gate.
+        owned_generations_.erase(held);
     }
 
     std::string generation = create_runtime_generation_id(error);
     if (generation.empty()) {
         return fail_closed(BrokerErrorCode::InternalFailure, std::move(error));
     }
+    // Crash-safe order: claim the durable store identity BEFORE creating the
+    // kernel Job. A crash between claim and Job creation leaves a Pending
+    // index entry that fails closed (Busy) until manual recovery; the reverse
+    // order would leak a live kernel Job with no durable owner record.
     if (!journal_.claim_identity(identity, generation, error)) {
         return fail_closed(BrokerErrorCode::RecoveryRequired, std::move(error));
     }
@@ -312,6 +370,11 @@ BrokerReply OwnershipSupervisor::reserve_identity(const Request& request) {
     auto created = jobs_.create_non_killing(identity, generation);
     if (created.state != JobCreateState::Created || created.job == nullptr ||
         created.object_name != object_name) {
+        // The durable Pending claim plus the pending journal record remain, so
+        // a retry or crash-recovery pass fails closed (Busy) instead of
+        // silently dropping the reservation. The supervisor lifecycle enters
+        // RecoveryRequired and the operator must resolve the orphaned Pending
+        // state manually before another launch.
         lifecycle_ = SupervisorLifecycle::RecoveryRequired;
         return fail_closed(BrokerErrorCode::RecoveryRequired,
             "Native Job creation did not produce the expected new object: " + created.error);
@@ -324,7 +387,7 @@ BrokerReply OwnershipSupervisor::reserve_identity(const Request& request) {
             "The Job exists but durable ownership registration failed: " + error);
     }
     owned_generations_.insert_or_assign(identity.key(),
-        OwnedGeneration{metadata, std::move(created.job), false});
+        OwnedGeneration{metadata, std::move(created.job), {}, {}, {}, 0, 0, false});
     return {BrokerErrorCode::None, LifecycleState::Ready,
         "Reserved generation=" + generation + "; Job is owned by this supervisor; no process was launched."};
 }
@@ -352,29 +415,73 @@ BrokerReply OwnershipSupervisor::finalize_empty(const Request& request) {
         return fail_closed(BrokerErrorCode::RecoveryRequired,
             "Native evidence did not establish verified-empty ownership: " + decision.detail);
     }
-    if (!journal_.mark_empty_verified(identity, generation, error) ||
-        !journal_.mark_identity_empty(identity, generation, decision, error)) {
+    // Persist the per-identity tombstone first (journal record), then flip the
+    // authority-store index entry. mark_empty_verified() alone is refused by
+    // the journal; write the tombstone through the supervisor-only helper so a
+    // direct tombstone write can never manufacture trusted empty state.
+    if (!finalize_generation(identity, generation, decision, error)) {
         lifecycle_ = SupervisorLifecycle::RecoveryRequired;
         return fail_closed(BrokerErrorCode::RecoveryRequired,
             "Could not finalize verified-empty ownership: " + error);
-    }
-    auto held = owned_generations_.find(identity.key());
-    if (held != owned_generations_.end() &&
-        held->second.metadata.generation_id == generation) {
-        held->second.metadata.phase = RuntimeLaunchPhase::StopRequested;
-        held->second.empty_verified = true;
     }
     return {BrokerErrorCode::None, LifecycleState::Ready,
         "EmptyVerified; fresh native Job/root validation and durable finalization completed."};
 }
 
+bool OwnershipSupervisor::finalize_generation(const CanonicalAvdIdentity& identity,
+        std::string_view generation_id, const RecoveryDecision& decision,
+        std::string& error) {
+    error.clear();
+    if (!decision.replacement_launch_permitted()) {
+        error = "Only native-backed EmptyVerified evidence may finalize a runtime generation.";
+        return false;
+    }
+    if (!journal_.write_verified_empty_tombstone(identity, generation_id, error) ||
+        !journal_.mark_identity_empty(identity, generation_id, decision, error)) {
+        return false;
+    }
+    const auto held = owned_generations_.find(identity.key());
+    if (held != owned_generations_.end() &&
+        held->second.metadata.generation_id == generation_id) {
+        held->second.metadata.phase = RuntimeLaunchPhase::StopRequested;
+        held->second.empty_verified = true;
+        held->second.process.reset();
+        held->second.runtime_status.state = RuntimeLifecycleState::Stopped;
+        held->second.runtime_status.guest_ready = false;
+        held->second.runtime_status.active_process_count = 0;
+    }
+    return true;
+}
+
 bool OwnershipSupervisor::shutdown_if_empty(std::string& error) {
     std::lock_guard lock(mutex_);
+    error.clear();
+    if (lifecycle_ != SupervisorLifecycle::Ready) {
+        error = "Supervisor cannot shut down without a verified Ready lifecycle.";
+        return false;
+    }
+    if (owned_generations_.empty()) {
+        const auto store = journal_.load_store();
+        if (!all_store_entries_empty_verified(store)) {
+            error = "Supervisor cannot shut down without a freshly verified empty owner store.";
+            return false;
+        }
+    }
     for (const auto& [key, generation] : owned_generations_) {
         static_cast<void>(key);
-        const JournalLoadResult record{JournalLoadState::Record, generation.metadata, {}};
+        // Fail-closed: entries whose in-memory phase predates process-creation
+        // or whose Job handle was released out-of-band cannot be trusted from
+        // memory alone. Reload durable state so shutdown requires the same
+        // fresh native verification as finalize_empty().
+        const auto durable = journal_.load(generation.metadata.identity);
+        if (durable.state != JournalLoadState::Record || !durable.record.has_value() ||
+            durable.record->generation_id != generation.metadata.generation_id) {
+            error = "Supervisor cannot shut down: durable ownership for an owned "
+                "generation is missing or ambiguous; manual recovery is required.";
+            return false;
+        }
         const auto decision = assess_recovery(generation.metadata.identity,
-            record, jobs_, membership_);
+            durable, jobs_, membership_);
         if (!decision.replacement_launch_permitted()) {
             error = "Supervisor cannot shut down while an owned generation is active or uncertain: " +
                 decision.detail;
