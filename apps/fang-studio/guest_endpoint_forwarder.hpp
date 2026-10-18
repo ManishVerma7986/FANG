@@ -92,8 +92,17 @@ struct TransportResult {
 struct GuestDaemonProtocol {
     static constexpr uint16_t default_port = 24800;
     static constexpr std::string_view guest_staging_path = "/data/local/tmp/fang-input-daemon";
-    static constexpr std::string_view start_cmd_template = "CLASSPATH=/data/local/tmp/fang-input-daemon app_process /data/local/tmp fang.input.daemon.Main";
-    // Note: actual daemon startup command may vary based on artifact structure
+    static constexpr std::string_view daemon_binary_name = "fang-input-daemon";
+    // Correct startup: direct execution of the native ELF binary with --port argument
+    // The daemon is a standalone native executable, NOT a Java class for app_process
+    static constexpr std::string_view start_cmd_template = 
+        "/data/local/tmp/fang-input-daemon --port {port} --session-id {session_id} --generation-id {generation_id} --backend {backend}";
+    // Readiness protocol: Hello/HelloAck handshake
+    static constexpr uint32_t handshake_magic = 0x46495043; // "FIPC"
+    static constexpr uint16_t handshake_version = 1;
+    static constexpr std::size_t wire_header_size = 32;
+    static constexpr std::chrono::milliseconds default_handshake_timeout{5000};
+    static constexpr std::chrono::milliseconds default_startup_timeout{15000};
 };
 
 // Configuration for live transport operations
@@ -131,17 +140,21 @@ public:
         uint64_t expected_size,
         const std::string& expected_sha256) = 0;
 
-    // Start the guest daemon
+    // Start the guest daemon with session and generation IDs for protocol handshake
     virtual TransportResult start_daemon(
         const std::string& serial_or_avd,
         const std::string& guest_staging_path,
-        const std::string& guest_port) = 0;
+        const std::string& guest_port,
+        const std::string& session_id,
+        const std::string& generation_id) = 0;
 
-    // Verify daemon is reachable and responsive
+    // Verify daemon is reachable and responsive with protocol handshake
     virtual TransportResult verify_connection(
         const std::string& serial_or_avd,
         uint16_t host_port,
-        std::chrono::milliseconds timeout) = 0;
+        std::chrono::milliseconds timeout,
+        const std::string& session_id,
+        const std::string& generation_id) = 0;
 
     // Check if target device is online and compatible
     virtual TransportResult validate_target(
@@ -213,12 +226,16 @@ public:
     TransportResult start_daemon(
         const std::string& serial_or_avd,
         const std::string& guest_staging_path,
-        const std::string& guest_port) override;
+        const std::string& guest_port,
+        const std::string& session_id,
+        const std::string& generation_id) override;
     
     TransportResult verify_connection(
         const std::string& serial_or_avd,
         uint16_t host_port,
-        std::chrono::milliseconds timeout) override;
+        std::chrono::milliseconds timeout,
+        const std::string& session_id,
+        const std::string& generation_id) override;
     
     TransportResult validate_target(
         const std::string& serial_or_avd,
@@ -276,12 +293,16 @@ public:
     TransportResult start_daemon(
         const std::string& serial_or_avd,
         const std::string& guest_staging_path,
-        const std::string& guest_port) override;
+        const std::string& guest_port,
+        const std::string& session_id,
+        const std::string& generation_id) override;
     
     TransportResult verify_connection(
         const std::string& serial_or_avd,
         uint16_t host_port,
-        std::chrono::milliseconds timeout) override;
+        std::chrono::milliseconds timeout,
+        const std::string& session_id,
+        const std::string& generation_id) override;
     
     TransportResult validate_target(
         const std::string& serial_or_avd,
@@ -298,6 +319,11 @@ public:
     void set_verify_connection_result(TransportResult result) { verify_connection_result_ = std::move(result); }
     void set_validate_target_result(TransportResult result) { validate_target_result_ = std::move(result); }
     void set_setup_forwarding_result(bool success, std::string diag = "") { setup_success_ = success; setup_diag_ = std::move(diag); }
+    
+    // Handshake simulation control
+    void set_handshake_success(bool success) { handshake_success_ = success; }
+    void set_handshake_error_code(const std::string& code) { handshake_error_code_ = code; }
+    void set_handshake_diagnostic(const std::string& diag) { handshake_diagnostic_ = diag; }
     
     // Track calls for verification
     struct CallLog {
@@ -326,6 +352,11 @@ private:
     bool device_online_ = true;
     fang::guest::GuestTargetAbi device_abi_ = fang::guest::GuestTargetAbi::X86_64;
     std::string device_serial_ = "emulator-5554";
+    
+    // Handshake simulation
+    bool handshake_success_ = true;
+    std::string handshake_error_code_ = "HANDSHAKE_FAILED";
+    std::string handshake_diagnostic_ = "Fake handshake failed";
     
     void log_call(const std::string& op, const std::string& serial, const std::string& detail);
 };

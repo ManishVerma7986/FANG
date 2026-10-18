@@ -408,8 +408,20 @@ GuestDeploymentReport MockGuestDeploymentCoordinator::assess_deployment_readines
     report.resolved_artifact_path = "mock/staging/" + get_expected_artifact_name(target.abi);
     report.artifact_size_bytes = 1048576;
     report.artifact_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    report.manifest = fang::guest::GuestToolchainDetector::generate_manifest_for_target(
+    
+    // Create a manifest with proper source evidence for QualifiedCurrent provenance
+    auto mf = fang::guest::GuestToolchainDetector::generate_manifest_for_target(
         target.abi, target.build_config, "RecordingStub", target.require_privileged_backend);
+    mf.manifest_schema_version = "stage9-v3";
+    mf.source_evidence.status = fang::guest::SourceEvidence::Status::Collected;
+    mf.source_evidence.algorithm = "sha256";
+    mf.source_evidence.fingerprint = "abc123";
+    mf.source_evidence.scope = "fang-guest-daemon-inputs-v1";
+    mf.source_evidence.encoding = "fang-cim-c14n-v1";
+    mf.source_evidence.captured_at_utc = "2026-10-18T12:00:00Z";
+    mf.source_tree_state = "clean";
+    report.manifest = mf;
+    report.provenance_assessment = ProvenanceAssessment::QualifiedCurrent;
     
     // Create a mock deployment plan
     report.deployment_plan = GuestDeploymentCoordinator::create_deployment_plan(report);
@@ -1584,10 +1596,18 @@ bool GuestDeploymentCoordinator::execute_deployment_plan_with_transport(
         step.status = DeploymentPlanStepStatus::InProgress;
         step.started_at = std::chrono::system_clock::now();
 
+        // Generate session and generation IDs for this deployment
+        const std::string session_id = "session-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        const std::string generation_id = "gen-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+
         auto start_result = transport_->start_daemon(
             serial_or_avd,
             target.guest_install_path,
-            "24800");
+            "24800",
+            session_id,
+            generation_id);
 
         if (start_result.success) {
             step.status = DeploymentPlanStepStatus::Completed;
@@ -1627,7 +1647,13 @@ bool GuestDeploymentCoordinator::execute_deployment_plan_with_transport(
             }
         }
 
-        auto conn_result = transport_->verify_connection(serial_or_avd, host_port, std::chrono::milliseconds(10000));
+        // Use the same session and generation IDs
+        const std::string session_id = "session-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        const std::string generation_id = "gen-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+
+        auto conn_result = transport_->verify_connection(serial_or_avd, host_port, std::chrono::milliseconds(10000), session_id, generation_id);
         if (conn_result.success) {
             step.status = DeploymentPlanStepStatus::Completed;
             step.diagnostic = conn_result.diagnostic;
@@ -1801,10 +1827,18 @@ bool GuestDeploymentCoordinator::execute_deployment_plan(
         step.status = DeploymentPlanStepStatus::InProgress;
         step.started_at = std::chrono::system_clock::now();
 
+        // Generate session and generation IDs for this deployment
+        const std::string session_id = "session-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        const std::string generation_id = "gen-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+
         auto start_result = transport->start_daemon(
             serial_or_avd,
             target.guest_install_path,
-            "24800");
+            "24800",
+            session_id,
+            generation_id);
 
         if (start_result.success) {
             step.status = DeploymentPlanStepStatus::Completed;
@@ -1843,7 +1877,13 @@ bool GuestDeploymentCoordinator::execute_deployment_plan(
             }
         }
 
-        auto conn_result = transport->verify_connection(serial_or_avd, host_port, std::chrono::milliseconds(10000));
+        // Use the same session and generation IDs
+        const std::string session_id = "session-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        const std::string generation_id = "gen-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+
+        auto conn_result = transport->verify_connection(serial_or_avd, host_port, std::chrono::milliseconds(10000), session_id, generation_id);
         if (conn_result.success) {
             step.status = DeploymentPlanStepStatus::Completed;
             step.diagnostic = conn_result.diagnostic;

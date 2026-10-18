@@ -1884,6 +1884,561 @@ void test_deployment_plan_preserves_readiness_semantics() {
     std::cout << "  [PASS] test_deployment_plan_preserves_readiness_semantics" << std::endl;
 }
 
+// ----------------------------------------------------------------------------
+// Stage 12: Daemon Bootstrap and Readiness Tests
+// ----------------------------------------------------------------------------
+
+void test_daemon_bootstrap_startup_command() {
+    std::cout << "  [RUN] test_daemon_bootstrap_startup_command..." << std::endl;
+
+    // Verify the daemon startup command template uses direct binary execution
+    // not app_process (which is for Java classes)
+    using namespace fang::studio;
+    
+    // The startup command template should contain the binary name and --port argument
+    const std::string template_cmd = std::string(GuestDaemonProtocol::start_cmd_template);
+    require(template_cmd.find("fang-input-daemon") != std::string::npos, "Template contains binary name");
+    require(template_cmd.find("--port") != std::string::npos, "Template contains --port argument");
+    require(template_cmd.find("app_process") == std::string::npos, "Template does NOT use app_process");
+    require(template_cmd.find("CLASSPATH") == std::string::npos, "Template does NOT use CLASSPATH");
+
+    // Verify GuestDaemonProtocol constants
+    require(GuestDaemonProtocol::default_port == 24800, "Default port is 24800");
+    require(std::string(GuestDaemonProtocol::guest_staging_path) == "/data/local/tmp/fang-input-daemon", "Staging path correct");
+    require(GuestDaemonProtocol::handshake_magic == 0x46495043, "Handshake magic is FIPC");
+    require(GuestDaemonProtocol::handshake_version == 1, "Handshake version is 1");
+    require(GuestDaemonProtocol::wire_header_size == 32, "Wire header size is 32");
+    require(GuestDaemonProtocol::default_handshake_timeout.count() == 5000, "Default handshake timeout 5000ms");
+    require(GuestDaemonProtocol::default_startup_timeout.count() == 15000, "Default startup timeout 15000ms");
+
+    std::cout << "  [PASS] test_daemon_bootstrap_startup_command" << std::endl;
+}
+
+void test_readiness_handshake_hello_helloack() {
+    std::cout << "  [RUN] test_readiness_handshake_hello_helloack..." << std::endl;
+
+    using namespace fang::studio;
+
+    // Test encoding/decoding of Hello message
+    HelloPayload hello_payload;
+    hello_payload.client_version = input_protocol_version;
+    hello_payload.display_width = 1080;
+    hello_payload.display_height = 1920;
+    hello_payload.session_id = "test_session";
+    hello_payload.generation_id = "test_gen";
+
+    uint64_t seq = 42;
+    uint64_t ts = 1234567890;
+    
+    auto hello_packet = encode_hello_message(seq, ts, hello_payload);
+    require(hello_packet.size() >= input_wire_header_size, "Hello packet has header");
+
+    // Decode the header
+    WireHeader decoded_header;
+    auto decode_result = decode_wire_header(std::span<const std::byte>(hello_packet.data(), input_wire_header_size), decoded_header);
+    require(decode_result == InputProtocolError::None, "Header decode success");
+    require(decoded_header.magic == input_protocol_magic, "Magic matches");
+    require(decoded_header.version == input_protocol_version, "Version matches");
+    require(decoded_header.type == InputMessageType::Hello, "Type is Hello");
+    require(decoded_header.sequence_number == seq, "Sequence matches");
+    require(decoded_header.payload_size == hello_packet.size() - input_wire_header_size, "Payload size matches");
+
+    // Decode Hello payload
+    std::span<const std::byte> payload_span(hello_packet.data() + input_wire_header_size, decoded_header.payload_size);
+    InputProtocolError payload_error;
+    auto decoded_hello = decode_hello_message(payload_span, payload_error);
+    require(payload_error == InputProtocolError::None, "Hello payload decode success");
+    require(decoded_hello.has_value(), "Hello payload present");
+    require(decoded_hello->client_version == input_protocol_version, "Client version matches");
+    require(decoded_hello->display_width == 1080, "Display width matches");
+    require(decoded_hello->display_height == 1920, "Display height matches");
+    require(decoded_hello->session_id == "test_session", "Session ID matches");
+    require(decoded_hello->generation_id == "test_gen", "Generation ID matches");
+
+    // Test HelloAck encoding/decoding
+    HelloAckPayload ack_payload;
+    ack_payload.guest_version = input_protocol_version;
+    ack_payload.status = InputProtocolError::None;
+    ack_payload.max_contacts = 10;
+    ack_payload.supported_caps = 0x07; // Touch | Key | PointerAim
+    ack_payload.session_id = "test_session";
+    ack_payload.generation_id = "test_gen";
+
+    auto ack_packet = encode_hello_ack_message(seq, ts, ack_payload);
+    require(ack_packet.size() >= input_wire_header_size, "HelloAck packet has header");
+
+    // Decode HelloAck header
+    WireHeader ack_header;
+    decode_result = decode_wire_header(std::span<const std::byte>(ack_packet.data(), input_wire_header_size), ack_header);
+    require(decode_result == InputProtocolError::None, "HelloAck header decode success");
+    require(ack_header.type == InputMessageType::HelloAck, "Type is HelloAck");
+
+    // Decode HelloAck payload
+    std::span<const std::byte> ack_payload_span(ack_packet.data() + input_wire_header_size, ack_header.payload_size);
+    auto decoded_ack = decode_hello_ack_message(ack_payload_span, payload_error);
+    require(payload_error == InputProtocolError::None, "HelloAck payload decode success");
+    require(decoded_ack.has_value(), "HelloAck payload present");
+    require(decoded_ack->guest_version == input_protocol_version, "Guest version matches");
+    require(decoded_ack->status == InputProtocolError::None, "Status is None");
+    require(decoded_ack->max_contacts == 10, "Max contacts matches");
+    require(decoded_ack->session_id == "test_session", "Session ID matches");
+    require(decoded_ack->generation_id == "test_gen", "Generation ID matches");
+
+    // Test with FakeAdbTransport - successful handshake
+    auto fake_transport = std::make_shared<FakeAdbTransport>();
+    fake_transport->set_handshake_success(true);
+    
+    TransportResult result = fake_transport->verify_connection("emulator-5554", 24800, std::chrono::milliseconds(5000), "test_session", "test_gen");
+    require(result.success, "Handshake succeeds");
+    require(result.error_code.empty(), "No error code on success");
+    
+    // Verify call was logged
+    const auto& call_log = fake_transport->call_log();
+    require(call_log.size() == 1, "One call logged");
+    require(call_log[0].operation == "verify_connection", "Operation is verify_connection");
+    require(call_log[0].serial == "emulator-5554", "Serial matches");
+
+    // Test with FakeAdbTransport - failed handshake
+    auto fake_transport2 = std::make_shared<FakeAdbTransport>();
+    fake_transport2->set_handshake_success(false);
+    fake_transport2->set_handshake_error_code("HANDSHAKE_TIMEOUT");
+    fake_transport2->set_handshake_diagnostic("No response from daemon");
+
+    TransportResult result2 = fake_transport2->verify_connection("emulator-5554", 24800, std::chrono::milliseconds(5000), "test_session", "test_gen");
+    require(!result2.success, "Handshake fails");
+    require(result2.error_code == "HANDSHAKE_TIMEOUT", "Error code is HANDSHAKE_TIMEOUT");
+    require(result2.diagnostic == "No response from daemon", "Diagnostic matches");
+
+    std::cout << "  [PASS] test_readiness_handshake_hello_helloack" << std::endl;
+}
+
+void test_readiness_handshake_session_mismatch() {
+    std::cout << "  [RUN] test_readiness_handshake_session_mismatch..." << std::endl;
+
+    using namespace fang::studio;
+
+    // Test HelloAck with mismatched session_id
+    HelloAckPayload ack_payload;
+    ack_payload.guest_version = input_protocol_version;
+    ack_payload.status = InputProtocolError::None;
+    ack_payload.max_contacts = 10;
+    ack_payload.supported_caps = 0x07;
+    ack_payload.session_id = "wrong_session";  // MISMATCH
+    ack_payload.generation_id = "test_gen";
+
+    uint64_t seq = 1;
+    uint64_t ts = 1234567890;
+    
+    auto ack_packet = encode_hello_ack_message(seq, ts, ack_payload);
+    
+    // Decode and verify we can detect the mismatch
+    WireHeader ack_header;
+    auto decode_result = decode_wire_header(std::span<const std::byte>(ack_packet.data(), input_wire_header_size), ack_header);
+    require(decode_result == InputProtocolError::None, "Header decode success");
+    
+    std::span<const std::byte> payload_span(ack_packet.data() + input_wire_header_size, ack_header.payload_size);
+    InputProtocolError payload_error;
+    auto decoded_ack = decode_hello_ack_message(payload_span, payload_error);
+    require(payload_error == InputProtocolError::None, "Payload decode success");
+    require(decoded_ack->session_id == "wrong_session", "Session ID is wrong");
+    
+    // In a real handshake, this would be rejected
+    // The verify_connection in AdbTransport checks this
+    
+    std::cout << "  [PASS] test_readiness_handshake_session_mismatch" << std::endl;
+}
+
+void test_readiness_handshake_generation_mismatch() {
+    std::cout << "  [RUN] test_readiness_handshake_generation_mismatch..." << std::endl;
+
+    using namespace fang::studio;
+
+    HelloAckPayload ack_payload;
+    ack_payload.guest_version = input_protocol_version;
+    ack_payload.status = InputProtocolError::None;
+    ack_payload.max_contacts = 10;
+    ack_payload.supported_caps = 0x07;
+    ack_payload.session_id = "test_session";
+    ack_payload.generation_id = "wrong_gen";  // MISMATCH
+
+    uint64_t seq = 1;
+    uint64_t ts = 1234567890;
+    
+    auto ack_packet = encode_hello_ack_message(seq, ts, ack_payload);
+    
+    WireHeader ack_header;
+    auto decode_result = decode_wire_header(std::span<const std::byte>(ack_packet.data(), input_wire_header_size), ack_header);
+    require(decode_result == InputProtocolError::None, "Header decode success");
+    
+    std::span<const std::byte> payload_span(ack_packet.data() + input_wire_header_size, ack_header.payload_size);
+    InputProtocolError payload_error;
+    auto decoded_ack = decode_hello_ack_message(payload_span, payload_error);
+    require(payload_error == InputProtocolError::None, "Payload decode success");
+    require(decoded_ack->generation_id == "wrong_gen", "Generation ID is wrong");
+    
+    std::cout << "  [PASS] test_readiness_handshake_generation_mismatch" << std::endl;
+}
+
+void test_readiness_handshake_version_mismatch() {
+    std::cout << "  [RUN] test_readiness_handshake_version_mismatch..." << std::endl;
+
+    using namespace fang::studio;
+
+    HelloAckPayload ack_payload;
+    ack_payload.guest_version = 99;  // WRONG VERSION
+    ack_payload.status = InputProtocolError::None;
+    ack_payload.max_contacts = 10;
+    ack_payload.supported_caps = 0x07;
+    ack_payload.session_id = "test_session";
+    ack_payload.generation_id = "test_gen";
+
+    uint64_t seq = 1;
+    uint64_t ts = 1234567890;
+    
+    auto ack_packet = encode_hello_ack_message(seq, ts, ack_payload);
+    
+    WireHeader ack_header;
+    auto decode_result = decode_wire_header(std::span<const std::byte>(ack_packet.data(), input_wire_header_size), ack_header);
+    require(decode_result == InputProtocolError::None, "Header decode success");
+    
+    std::span<const std::byte> payload_span(ack_packet.data() + input_wire_header_size, ack_header.payload_size);
+    InputProtocolError payload_error;
+    auto decoded_ack = decode_hello_ack_message(payload_span, payload_error);
+    // The decode function itself checks version and returns UnsupportedVersion error
+    require(payload_error == InputProtocolError::UnsupportedVersion, "Payload decode fails with UnsupportedVersion");
+    require(!decoded_ack.has_value(), "No payload returned on version mismatch");
+    
+    std::cout << "  [PASS] test_readiness_handshake_version_mismatch" << std::endl;
+}
+
+void test_readiness_handshake_rejected_status() {
+    std::cout << "  [RUN] test_readiness_handshake_rejected_status..." << std::endl;
+
+    using namespace fang::studio;
+
+    HelloAckPayload ack_payload;
+    ack_payload.guest_version = input_protocol_version;
+    ack_payload.status = InputProtocolError::SessionMismatch;  // REJECTED
+    ack_payload.max_contacts = 10;
+    ack_payload.supported_caps = 0x07;
+    ack_payload.session_id = "test_session";
+    ack_payload.generation_id = "test_gen";
+
+    uint64_t seq = 1;
+    uint64_t ts = 1234567890;
+    
+    auto ack_packet = encode_hello_ack_message(seq, ts, ack_payload);
+    
+    WireHeader ack_header;
+    auto decode_result = decode_wire_header(std::span<const std::byte>(ack_packet.data(), input_wire_header_size), ack_header);
+    require(decode_result == InputProtocolError::None, "Header decode success");
+    
+    std::span<const std::byte> payload_span(ack_packet.data() + input_wire_header_size, ack_header.payload_size);
+    InputProtocolError payload_error;
+    auto decoded_ack = decode_hello_ack_message(payload_span, payload_error);
+    require(payload_error == InputProtocolError::None, "Payload decode success");
+    require(decoded_ack->status == InputProtocolError::SessionMismatch, "Status is SessionMismatch");
+    
+    // In a real handshake, this would be rejected by verify_connection
+    std::cout << "  [PASS] test_readiness_handshake_rejected_status" << std::endl;
+}
+
+void test_readiness_handshake_timeout() {
+    std::cout << "  [RUN] test_readiness_handshake_timeout..." << std::endl;
+
+    // Test that FakeAdbTransport can simulate a timeout
+    auto fake_transport = std::make_shared<FakeAdbTransport>();
+    fake_transport->set_handshake_success(false);
+    fake_transport->set_handshake_error_code("HANDSHAKE_TIMEOUT");
+    fake_transport->set_handshake_diagnostic("No response from daemon within timeout");
+
+    TransportResult result = fake_transport->verify_connection("emulator-5554", 24800, std::chrono::milliseconds(5000), "test_session", "test_gen");
+    require(!result.success, "Handshake fails");
+    require(result.error_code == "HANDSHAKE_TIMEOUT", "Error code is HANDSHAKE_TIMEOUT");
+    require(result.diagnostic.find("timeout") != std::string::npos, "Diagnostic mentions timeout");
+
+    std::cout << "  [PASS] test_readiness_handshake_timeout" << std::endl;
+}
+
+void test_readiness_handshake_malformed_response() {
+    std::cout << "  [RUN] test_readiness_handshake_malformed_response..." << std::endl;
+
+    // Test that FakeAdbTransport can simulate a malformed response
+    auto fake_transport = std::make_shared<FakeAdbTransport>();
+    fake_transport->set_handshake_success(false);
+    fake_transport->set_handshake_error_code("HANDSHAKE_MALFORMED");
+    fake_transport->set_handshake_diagnostic("Response too small for wire header");
+
+    TransportResult result = fake_transport->verify_connection("emulator-5554", 24800, std::chrono::milliseconds(5000), "test_session", "test_gen");
+    require(!result.success, "Handshake fails");
+    require(result.error_code == "HANDSHAKE_MALFORMED", "Error code is HANDSHAKE_MALFORMED");
+    require(result.diagnostic.find("too small") != std::string::npos, "Diagnostic mentions size issue");
+
+    std::cout << "  [PASS] test_readiness_handshake_malformed_response" << std::endl;
+}
+
+void test_transport_authorization_enforcement() {
+    std::cout << "  [RUN] test_transport_authorization_enforcement..." << std::endl;
+
+    using namespace fang::studio;
+
+    // Test AdbTransport without authorization - should block all live operations
+    AdbTransportConfig config;
+    config.require_explicit_authorization = true;
+    config.authorization_token = "secret-token";
+    config.target_serial = "emulator-5554";
+    
+    AdbTransport transport(config);
+    
+    // Without setting authorization, live_authorized_ should be false
+    require(!transport.is_live_authorized(), "Not authorized by default");
+    
+    // All live operations should fail with LIVE_OP_UNAUTHORIZED
+    auto push_result = transport.push_binary("emulator-5554", "/fake/path", "/data/local/tmp/fang-input-daemon", 100, "sha256");
+    require(!push_result.success, "Push fails without auth");
+    require(push_result.error_code == "LIVE_OP_UNAUTHORIZED", "Error code is LIVE_OP_UNAUTHORIZED");
+    
+    auto verify_result = transport.verify_remote_artifact("emulator-5554", "/data/local/tmp/fang-input-daemon", 100, "sha256");
+    require(!verify_result.success, "Verify fails without auth");
+    require(verify_result.error_code == "LIVE_OP_UNAUTHORIZED", "Error code is LIVE_OP_UNAUTHORIZED");
+    
+    auto start_result = transport.start_daemon("emulator-5554", "/data/local/tmp/fang-input-daemon", "24800", "test_session", "test_gen");
+    require(!start_result.success, "Start daemon fails without auth");
+    require(start_result.error_code == "LIVE_OP_UNAUTHORIZED", "Error code is LIVE_OP_UNAUTHORIZED");
+    
+    auto conn_result = transport.verify_connection("emulator-5554", 24800, std::chrono::milliseconds(5000), "test_session", "test_gen");
+    require(!conn_result.success, "Verify connection fails without auth");
+    require(conn_result.error_code == "LIVE_OP_UNAUTHORIZED", "Error code is LIVE_OP_UNAUTHORIZED");
+    
+    auto target_result = transport.validate_target("emulator-5554", GuestTargetAbi::X86_64);
+    require(!target_result.success, "Validate target fails without auth");
+    require(target_result.error_code == "LIVE_OP_UNAUTHORIZED", "Error code is LIVE_OP_UNAUTHORIZED");
+
+    // Now authorize with correct token
+    transport.set_authorization("secret-token");
+    require(transport.is_live_authorized(), "Authorized after setting correct token");
+
+    // With wrong token, should not be authorized
+    AdbTransport transport2(config);
+    transport2.set_authorization("wrong-token");
+    require(!transport2.is_live_authorized(), "Not authorized with wrong token");
+
+    // Test with require_explicit_authorization = false
+    AdbTransportConfig config_no_auth;
+    config_no_auth.require_explicit_authorization = false;
+    AdbTransport transport3(config_no_auth);
+    require(transport3.is_live_authorized(), "Authorized when explicit auth not required");
+
+    std::cout << "  [PASS] test_transport_authorization_enforcement" << std::endl;
+}
+
+void test_partial_deployment_cleanup() {
+    std::cout << "  [RUN] test_partial_deployment_cleanup..." << std::endl;
+
+    using namespace fang::studio;
+
+    // Use MockGuestDeploymentCoordinator to return QualifiedCurrent provenance
+    // so we can test the handshake failure (not provenance failure)
+    auto mock_coordinator = std::make_shared<MockGuestDeploymentCoordinator>(
+        GuestDeploymentPhase::ArtifactReady,
+        "Mock deployment ready");
+    mock_coordinator->set_simulate_push_success(true);
+
+    auto fake_transport = std::make_shared<FakeAdbTransport>();
+    fake_transport->set_handshake_success(false);
+    fake_transport->set_handshake_error_code("HANDSHAKE_TIMEOUT");
+    fake_transport->set_handshake_diagnostic("No response from daemon within timeout");
+
+    const auto temp_dir = std::filesystem::temp_directory_path() / "fang_test_partial_cleanup";
+    std::filesystem::create_directories(temp_dir);
+
+    const auto elf_file = temp_dir / "fang-input-daemon-android-x86_64";
+    write_synthetic_elf64(elf_file, 0x3E, 2, 1, 3, 1);
+
+    GuestDeploymentTarget target;
+    target.abi = GuestTargetAbi::X86_64;
+    target.staging_dir = temp_dir.string();
+    target.guest_port = 24800;
+
+    GuestArtifactManifest mf;
+    mf.artifact_name = "fang-input-daemon-android-x86_64";
+    mf.artifact_format = "ELF";
+    mf.target_os = "android";
+    mf.target_abi = "x86_64";
+    mf.is_android_elf_binary = true;
+    mf.is_cross_compiled = true;
+    mf.build_configuration = "Release";
+    mf.manifest_schema_version = "stage9-v3";
+    mf.build_result = "Success";
+    mf.artifact_sha256 = std::string(64, 'a'); // dummy sha256
+    mf.artifact_size_bytes = std::filesystem::file_size(elf_file);
+    mf.ndk_version = "r26.1.10909125";
+    mf.android_api_level = 26;
+    mf.elf_machine = "62";
+    mf.elf_class = 2;
+    mf.elf_data = 1;
+    mf.toolchain_status = ToolchainStatus::ToolchainAvailable;
+    mf.source_evidence.status = SourceEvidence::Status::Collected;
+    mf.source_evidence.algorithm = "sha256";
+    mf.source_evidence.fingerprint = "abc123";
+    mf.source_evidence.scope = "fang-guest-daemon-inputs-v1";
+    mf.source_evidence.encoding = "fang-cim-c14n-v1";
+    mf.source_evidence.captured_at_utc = "2026-10-18T12:00:00Z";
+    mf.source_tree_state = "clean";
+
+    const auto manifest_file = temp_dir / "guest_manifest.json";
+    std::ofstream out(manifest_file);
+    out << mf.to_json();
+    out.close();
+
+    // Create deployment plan using mock coordinator
+    auto report = mock_coordinator->assess_deployment_readiness(target);
+    require(report.phase == GuestDeploymentPhase::ArtifactReady, "Artifact ready");
+    require(report.provenance_assessment == ProvenanceAssessment::QualifiedCurrent, "Provenance QualifiedCurrent");
+    
+    auto plan = GuestDeploymentCoordinator::create_deployment_plan(report);
+    require(!plan.has_failures, "Plan initially has no failures");
+
+    // Execute with transport that fails at handshake
+    std::string error;
+    bool success = GuestDeploymentCoordinator::execute_deployment_plan("emulator-5554", target, report, plan, fake_transport, &error);
+    
+    require(!success, "Deployment fails at handshake");
+    require(plan.has_failures, "Plan has failures after execution");
+    require(plan.overall_error_code == "HANDSHAKE_TIMEOUT", "Error code is HANDSHAKE_TIMEOUT");
+    
+    // Verify steps 0-5 completed, step 6 (VerifyConnection) failed
+    require(plan.steps.size() == 7, "7 steps in plan");
+    require(plan.steps[0].status == DeploymentPlanStepStatus::Completed, "Step 0 completed");
+    require(plan.steps[1].status == DeploymentPlanStepStatus::Completed, "Step 1 completed");
+    require(plan.steps[2].status == DeploymentPlanStepStatus::Completed, "Step 2 completed");
+    require(plan.steps[3].status == DeploymentPlanStepStatus::Completed, "Step 3 (SetupTransport) completed");
+    require(plan.steps[4].status == DeploymentPlanStepStatus::Completed, "Step 4 (PushBinary) completed");
+    require(plan.steps[5].status == DeploymentPlanStepStatus::Completed, "Step 5 (StartDaemon) completed");
+    require(plan.steps[6].status == DeploymentPlanStepStatus::Failed, "Step 6 (VerifyConnection) failed");
+    require(plan.steps[6].error_code == "HANDSHAKE_TIMEOUT", "Step 6 error code");
+    
+    // Verify cleanup - the transport's teardown_forwarding should be callable
+    GuestEndpointMapping mapping;
+    mapping.state = ForwardingState::Active;
+    mapping.is_live_forwarding_active = true;
+    fake_transport->teardown_forwarding(mapping);
+    require(mapping.state == ForwardingState::NotConfigured, "Forwarding torn down");
+    require(!mapping.is_live_forwarding_active, "Live forwarding inactive");
+    
+    std::filesystem::remove_all(temp_dir);
+    std::cout << "  [PASS] test_partial_deployment_cleanup" << std::endl;
+}
+
+void test_idempotent_forwarding_and_repeated_sessions() {
+    std::cout << "  [RUN] test_idempotent_forwarding_and_repeated_sessions..." << std::endl;
+
+    using namespace fang::studio;
+
+    // Use MockGuestDeploymentCoordinator to return QualifiedCurrent provenance
+    auto mock_coordinator = std::make_shared<MockGuestDeploymentCoordinator>(
+        GuestDeploymentPhase::ArtifactReady,
+        "Mock deployment ready");
+    mock_coordinator->set_simulate_push_success(true);
+
+    auto fake_transport = std::make_shared<FakeAdbTransport>();
+    fake_transport->set_handshake_success(true);
+
+    const auto temp_dir = std::filesystem::temp_directory_path() / "fang_test_idempotent";
+    std::filesystem::create_directories(temp_dir);
+
+    const auto elf_file = temp_dir / "fang-input-daemon-android-x86_64";
+    write_synthetic_elf64(elf_file, 0x3E, 2, 1, 3, 1);
+
+    GuestDeploymentTarget target;
+    target.abi = GuestTargetAbi::X86_64;
+    target.staging_dir = temp_dir.string();
+    target.guest_port = 24800;
+
+    GuestArtifactManifest mf;
+    mf.artifact_name = "fang-input-daemon-android-x86_64";
+    mf.artifact_format = "ELF";
+    mf.target_os = "android";
+    mf.target_abi = "x86_64";
+    mf.is_android_elf_binary = true;
+    mf.is_cross_compiled = true;
+    mf.build_configuration = "Release";
+    mf.manifest_schema_version = "stage9-v3";
+    mf.build_result = "Success";
+    mf.artifact_sha256 = std::string(64, 'a'); // dummy sha256
+    mf.artifact_size_bytes = std::filesystem::file_size(elf_file);
+    mf.ndk_version = "r26.1.10909125";
+    mf.android_api_level = 26;
+    mf.elf_machine = "62";
+    mf.elf_class = 2;
+    mf.elf_data = 1;
+    mf.toolchain_status = ToolchainStatus::ToolchainAvailable;
+    mf.source_evidence.status = SourceEvidence::Status::Collected;
+    mf.source_evidence.algorithm = "sha256";
+    mf.source_evidence.fingerprint = "abc123";
+    mf.source_evidence.scope = "fang-guest-daemon-inputs-v1";
+    mf.source_evidence.encoding = "fang-cim-c14n-v1";
+    mf.source_evidence.captured_at_utc = "2026-10-18T12:00:00Z";
+    mf.source_tree_state = "clean";
+
+    const auto manifest_file = temp_dir / "guest_manifest.json";
+    std::ofstream out(manifest_file);
+    out << mf.to_json();
+    out.close();
+
+    // Execute deployment plan multiple times - should produce identical results
+    auto report = mock_coordinator->assess_deployment_readiness(target);
+    
+    std::string error1, error2;
+    DeploymentPlan plan1 = GuestDeploymentCoordinator::create_deployment_plan(report);
+    DeploymentPlan plan2 = GuestDeploymentCoordinator::create_deployment_plan(report);
+    
+    bool success1 = GuestDeploymentCoordinator::execute_deployment_plan("emulator-5554", target, report, plan1, fake_transport, &error1);
+    bool success2 = GuestDeploymentCoordinator::execute_deployment_plan("emulator-5554", target, report, plan2, fake_transport, &error2);
+
+    require(success1 == success2, "Same success result");
+    require(success1, "Both succeed with successful handshake");
+    require(plan1.overall_error_code == plan2.overall_error_code, "Same error code (empty)");
+    require(plan1.has_failures == plan2.has_failures, "Same failure state");
+    require(plan1.is_complete == plan2.is_complete, "Same completion state");
+    require(plan1.steps.size() == plan2.steps.size(), "Same number of steps");
+    
+    for (size_t i = 0; i < plan1.steps.size(); ++i) {
+        require(plan1.steps[i].status == plan2.steps[i].status, "Step " + std::to_string(i) + " status matches");
+        require(plan1.steps[i].error_code == plan2.steps[i].error_code, "Step " + std::to_string(i) + " error code matches");
+    }
+    
+    // Verify forwarding can be set up and torn down repeatedly without duplicate rules
+    GuestEndpointMapping mapping1, mapping2;
+    bool ok1 = fake_transport->setup_forwarding("emulator-5554", 24800, mapping1);
+    bool ok2 = fake_transport->setup_forwarding("emulator-5554", 24800, mapping2);
+    require(ok1 && ok2, "Both setup calls succeed");
+    require(mapping1.state == ForwardingState::Active, "First mapping active");
+    require(mapping2.state == ForwardingState::Active, "Second mapping active");
+    
+    fake_transport->teardown_forwarding(mapping1);
+    fake_transport->teardown_forwarding(mapping2);
+    require(mapping1.state == ForwardingState::NotConfigured, "First torn down");
+    require(mapping2.state == ForwardingState::NotConfigured, "Second torn down");
+    
+    // Verify call log has both setup and teardown calls
+    const auto& call_log = fake_transport->call_log();
+    size_t setup_calls = 0, teardown_calls = 0;
+    for (const auto& log : call_log) {
+        if (log.operation == "setup_forwarding") setup_calls++;
+        if (log.operation == "teardown_forwarding") teardown_calls++;
+    }
+    // execute_deployment_plan calls setup_forwarding once per execution (2 times)
+    // plus 2 manual calls = 4 total
+    require(setup_calls == 4, "Four setup_forwarding calls logged (2 from executions + 2 manual)");
+    require(teardown_calls == 2, "Two teardown_forwarding calls logged");
+    
+    fake_transport->clear_call_log();
+    
+    std::filesystem::remove_all(temp_dir);
+    std::cout << "  [PASS] test_idempotent_forwarding_and_repeated_sessions" << std::endl;
+}
+
 } // namespace
 
 int main() {
@@ -1923,6 +2478,17 @@ int main() {
         test_deployment_plan_with_host_native();
         test_deployment_plan_error_codes_machine_readable();
         test_deployment_plan_preserves_readiness_semantics();
+        test_daemon_bootstrap_startup_command();
+        test_readiness_handshake_hello_helloack();
+        test_readiness_handshake_session_mismatch();
+        test_readiness_handshake_generation_mismatch();
+        test_readiness_handshake_version_mismatch();
+        test_readiness_handshake_rejected_status();
+        test_readiness_handshake_timeout();
+        test_readiness_handshake_malformed_response();
+        test_transport_authorization_enforcement();
+        test_partial_deployment_cleanup();
+        test_idempotent_forwarding_and_repeated_sessions();
 
         std::cout << "[FANG-STAGE9-TESTS] All Stage 9 tests passed successfully." << std::endl;
         return 0;

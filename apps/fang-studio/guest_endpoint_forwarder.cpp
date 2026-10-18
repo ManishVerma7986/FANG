@@ -1,5 +1,7 @@
 #include "guest_endpoint_forwarder.hpp"
 #include "adb_input_dispatcher.hpp"
+#include "input_ipc_protocol.hpp"
+#include "socket_input_transport.hpp"
 
 #include <sstream>
 #include <chrono>
@@ -9,6 +11,7 @@
 #include <cstdlib>
 #include <array>
 #include <memory>
+#include <span>
 
 namespace fang::studio {
 
@@ -105,7 +108,7 @@ bool LoopbackTestForwarder::is_forwarding_active(const GuestEndpointMapping& map
 // ============================================================================
 
 AdbTransport::AdbTransport(const AdbTransportConfig& config)
-    : config_(config) {
+    : config_(config), live_authorized_(!config.require_explicit_authorization) {
     // Discover ADB executable if not provided
     if (config_.adb_executable.empty()) {
         config_.adb_executable = discover_adb_executable();
@@ -319,7 +322,9 @@ TransportResult AdbTransport::verify_remote_artifact(
 TransportResult AdbTransport::start_daemon(
     const std::string& serial_or_avd,
     const std::string& guest_staging_path,
-    const std::string& guest_port) {
+    const std::string& guest_port,
+    const std::string& session_id,
+    const std::string& generation_id) {
 
     if (!live_authorized_) {
         return TransportResult::fail("LIVE_OP_UNAUTHORIZED", "Daemon startup requires explicit authorization", "");
@@ -331,34 +336,164 @@ TransportResult AdbTransport::start_daemon(
         return TransportResult::fail("CHMOD_FAILED", "Failed to make daemon executable", chmod_result.detail);
     }
 
-    // Start daemon - the actual command depends on the daemon structure
-    // For now, use a generic app_process approach
-    std::string cmd = "CLASSPATH=" + guest_staging_path + " app_process /data/local/tmp fang.input.daemon.Main --port " + guest_port;
-    auto result = execute_adb_command({"shell", cmd}, config_.startup_timeout);
+    // Start daemon - the artifact is a native ELF binary, not a Java class
+    // Execute directly with --port argument and required configuration
+    // Use session_id and generation_id from deployment context for protocol handshake
+    std::string cmd = guest_staging_path + " --port " + guest_port + 
+        " --session-id " + session_id + 
+        " --generation-id " + generation_id + 
+        " --backend recording";
+    auto result = execute_adb_command({"shell", cmd + " &"}, config_.startup_timeout);
     if (!result.success) {
         return TransportResult::fail("DAEMON_START_FAILED", "Failed to start guest daemon", result.detail);
     }
 
-    return TransportResult::ok("Daemon startup initiated");
+    // Give the daemon a moment to bind to the port
+    execute_adb_command({"shell", "sleep", "1"}, std::chrono::milliseconds(2000));
+
+    // Verify the process is actually running by checking the process list
+    std::string ps_cmd = "ps -A | grep " + guest_staging_path;
+    auto ps_result = execute_adb_command({"shell", ps_cmd}, config_.command_timeout);
+    if (!ps_result.success || ps_result.detail.empty()) {
+        return TransportResult::fail("DAEMON_PROCESS_NOT_FOUND", 
+            "Daemon process not found after startup", 
+            "Command: " + cmd);
+    }
+
+    return TransportResult::ok("Daemon startup verified: " + cmd + " (PID found)");
 }
 
 TransportResult AdbTransport::verify_connection(
     const std::string& serial_or_avd,
     uint16_t host_port,
-    std::chrono::milliseconds timeout) {
+    std::chrono::milliseconds timeout,
+    const std::string& session_id,
+    const std::string& generation_id) {
 
     if (!live_authorized_) {
         return TransportResult::fail("LIVE_OP_UNAUTHORIZED", "Connection verification requires explicit authorization", "");
     }
 
-    // Try to connect to the forwarded port
-    // For now, we'll use a simple netcat or echo test via ADB
-    auto result = execute_adb_command({"shell", "timeout", "2", "bash", "-c", "echo test > /dev/tcp/127.0.0.1/" + std::to_string(host_port)}, config_.connection_timeout);
-    if (!result.success) {
-        return TransportResult::fail("CONNECTION_FAILED", "Failed to connect to guest daemon on forwarded port", result.detail);
+    // Connect to the forwarded port and perform Hello/HelloAck handshake
+    // This proves the daemon is listening, initialized, and protocol-compatible
+
+    SocketTransportConfig transport_config;
+    transport_config.host = "127.0.0.1";
+    transport_config.port = host_port;
+    transport_config.connect_timeout_ms = static_cast<uint32_t>(timeout.count());
+    transport_config.send_timeout_ms = 1000;
+    transport_config.tcp_nodelay = true;
+
+    SocketInputTransport transport(transport_config);
+
+    // Connect with timeout
+    if (!transport.connect()) {
+        return TransportResult::fail("CONNECTION_FAILED", 
+            "Failed to connect to guest daemon on forwarded port " + std::to_string(host_port),
+            transport.error_diagnostic());
     }
 
-    return TransportResult::ok("Connection to guest daemon verified on port " + std::to_string(host_port));
+    // Build Hello message with expected session/generation IDs
+    // These should match what the deployment coordinator configured
+    HelloPayload hello_payload;
+    hello_payload.client_version = input_protocol_version;
+    hello_payload.display_width = 1080;
+    hello_payload.display_height = 1920;
+    hello_payload.session_id = session_id;
+    hello_payload.generation_id = generation_id;
+
+    uint64_t seq = 1;
+    uint64_t ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    
+    auto hello_packet = encode_hello_message(seq, ts, hello_payload);
+
+    // Send Hello
+    std::span<const std::byte> hello_span(hello_packet.data(), hello_packet.data() + hello_packet.size());
+    if (!transport.send_bytes(hello_span)) {
+        transport.disconnect();
+        return TransportResult::fail("HANDSHAKE_SEND_FAILED", 
+            "Failed to send Hello message to guest daemon",
+            transport.error_diagnostic());
+    }
+
+    // Receive HelloAck with timeout
+    auto response = transport.receive_bytes(4096);
+    if (response.empty()) {
+        transport.disconnect();
+        return TransportResult::fail("HANDSHAKE_TIMEOUT", 
+            "No response from guest daemon within timeout",
+            "Waited " + std::to_string(timeout.count()) + "ms");
+    }
+
+    // Decode response header
+    if (response.size() < input_wire_header_size) {
+        transport.disconnect();
+        return TransportResult::fail("HANDSHAKE_MALFORMED", 
+            "Response too small for wire header",
+            "Got " + std::to_string(response.size()) + " bytes, need at least " + std::to_string(input_wire_header_size));
+    }
+
+    WireHeader resp_header;
+    std::span<const std::byte> header_span(response.data(), response.data() + input_wire_header_size);
+    auto decode_result = decode_wire_header(header_span, resp_header);
+    if (decode_result != InputProtocolError::None) {
+        transport.disconnect();
+        return TransportResult::fail("HANDSHAKE_INVALID_HEADER", 
+            "Failed to decode response header: " + std::string(input_protocol_error_name(decode_result)),
+            "Magic: " + std::to_string(resp_header.magic) + ", Version: " + std::to_string(resp_header.version));
+    }
+
+    if (resp_header.type != InputMessageType::HelloAck) {
+        transport.disconnect();
+        return TransportResult::fail("HANDSHAKE_UNEXPECTED_MESSAGE", 
+            "Expected HelloAck, got " + std::string(input_message_type_name(resp_header.type)),
+            "Sequence: " + std::to_string(resp_header.sequence_number));
+    }
+
+    // Decode HelloAck payload
+    std::span<const std::byte> payload_span(response.data() + input_wire_header_size, response.data() + input_wire_header_size + resp_header.payload_size);
+    InputProtocolError payload_error;
+    auto hello_ack = decode_hello_ack_message(payload_span, payload_error);
+    if (!hello_ack.has_value()) {
+        transport.disconnect();
+        return TransportResult::fail("HANDSHAKE_DECODE_FAILED", 
+            "Failed to decode HelloAck payload: " + std::string(input_protocol_error_name(payload_error)),
+            "");
+    }
+
+    // Validate handshake response
+    if (hello_ack->status != InputProtocolError::None) {
+        transport.disconnect();
+        return TransportResult::fail("HANDSHAKE_REJECTED", 
+            "Guest daemon rejected handshake: " + std::string(input_protocol_error_name(hello_ack->status)),
+            "Session: " + hello_ack->session_id + ", Generation: " + hello_ack->generation_id);
+    }
+
+    if (hello_ack->session_id != session_id) {
+        transport.disconnect();
+        return TransportResult::fail("HANDSHAKE_SESSION_MISMATCH", 
+            "Session ID mismatch in HelloAck",
+            "Expected: " + session_id + ", Got: " + hello_ack->session_id);
+    }
+
+    if (hello_ack->generation_id != generation_id) {
+        transport.disconnect();
+        return TransportResult::fail("HANDSHAKE_GENERATION_MISMATCH", 
+            "Generation ID mismatch in HelloAck",
+            "Expected: " + generation_id + ", Got: " + hello_ack->generation_id);
+    }
+
+    if (hello_ack->guest_version != input_protocol_version) {
+        transport.disconnect();
+        return TransportResult::fail("HANDSHAKE_VERSION_MISMATCH", 
+            "Protocol version mismatch",
+            "Expected: " + std::to_string(input_protocol_version) + ", Got: " + std::to_string(hello_ack->guest_version));
+    }
+
+    // Handshake successful - daemon is ready
+    transport.disconnect();
+    return TransportResult::ok("Readiness handshake successful: Hello/HelloAck exchanged, session=" + hello_ack->session_id + ", generation=" + hello_ack->generation_id + ", max_contacts=" + std::to_string(hello_ack->max_contacts));
 }
 
 TransportResult AdbTransport::validate_target(
@@ -502,18 +637,27 @@ TransportResult FakeAdbTransport::verify_remote_artifact(
 TransportResult FakeAdbTransport::start_daemon(
     const std::string& serial_or_avd,
     const std::string& guest_staging_path,
-    const std::string& guest_port) {
+    const std::string& guest_port,
+    const std::string& session_id,
+    const std::string& generation_id) {
 
-    log_call("start_daemon", serial_or_avd, guest_staging_path + " port=" + guest_port);
+    log_call("start_daemon", serial_or_avd, guest_staging_path + " port=" + guest_port + " session=" + session_id + " gen=" + generation_id);
     return start_daemon_result_;
 }
 
 TransportResult FakeAdbTransport::verify_connection(
     const std::string& serial_or_avd,
     uint16_t host_port,
-    std::chrono::milliseconds timeout) {
+    std::chrono::milliseconds timeout,
+    const std::string& session_id,
+    const std::string& generation_id) {
 
-    log_call("verify_connection", serial_or_avd, "host_port=" + std::to_string(host_port) + " timeout=" + std::to_string(timeout.count()));
+    log_call("verify_connection", serial_or_avd, "host_port=" + std::to_string(host_port) + " timeout=" + std::to_string(timeout.count()) + " session=" + session_id + " gen=" + generation_id);
+    
+    if (!handshake_success_) {
+        return TransportResult::fail(handshake_error_code_, handshake_diagnostic_, "");
+    }
+    
     return verify_connection_result_;
 }
 
