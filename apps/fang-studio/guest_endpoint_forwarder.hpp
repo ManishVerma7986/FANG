@@ -4,6 +4,11 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
+#include <optional>
+#include <filesystem>
+
+#include "guest_manifest.hpp"
 
 namespace fang::studio {
 
@@ -68,6 +73,91 @@ public:
     virtual std::string_view forwarder_name() const noexcept = 0;
 };
 
+// Structured result for transport operations
+struct TransportResult {
+    bool success{false};
+    std::string error_code;
+    std::string diagnostic;
+    std::string detail;
+    
+    static TransportResult ok(std::string diag = "") {
+        TransportResult r; r.success = true; r.diagnostic = std::move(diag); return r;
+    }
+    static TransportResult fail(std::string code, std::string diag, std::string detail = "") {
+        TransportResult r; r.success = false; r.error_code = std::move(code); r.diagnostic = std::move(diag); r.detail = std::move(detail); return r;
+    }
+};
+
+// Guest daemon protocol constants
+struct GuestDaemonProtocol {
+    static constexpr uint16_t default_port = 24800;
+    static constexpr std::string_view guest_staging_path = "/data/local/tmp/fang-input-daemon";
+    static constexpr std::string_view start_cmd_template = "CLASSPATH=/data/local/tmp/fang-input-daemon app_process /data/local/tmp fang.input.daemon.Main";
+    // Note: actual daemon startup command may vary based on artifact structure
+};
+
+// Configuration for live transport operations
+struct AdbTransportConfig {
+    std::filesystem::path adb_executable;
+    std::string target_serial;
+    std::string guest_staging_path = "/data/local/tmp/fang-input-daemon";
+    uint16_t guest_port = GuestDaemonProtocol::default_port;
+    std::chrono::milliseconds command_timeout{10000};
+    std::chrono::milliseconds push_timeout{30000};
+    std::chrono::milliseconds startup_timeout{15000};
+    std::chrono::milliseconds connection_timeout{5000};
+    bool require_explicit_authorization{true};  // Default: require explicit opt-in
+    std::string authorization_token;             // Must match configured token to enable live ops
+};
+
+// Abstract host-to-guest transport contract.
+// Extends IGuestEndpointForwarder with binary transfer, daemon lifecycle, and connection verification.
+class IGuestTransport : public IGuestEndpointForwarder {
+public:
+    virtual ~IGuestTransport() = default;
+
+    // Binary transfer: push the daemon artifact to the guest staging path
+    virtual TransportResult push_binary(
+        const std::string& serial_or_avd,
+        const std::filesystem::path& local_artifact_path,
+        const std::string& guest_staging_path,
+        uint64_t expected_size,
+        const std::string& expected_sha256) = 0;
+
+    // Verify remote artifact integrity
+    virtual TransportResult verify_remote_artifact(
+        const std::string& serial_or_avd,
+        const std::string& guest_staging_path,
+        uint64_t expected_size,
+        const std::string& expected_sha256) = 0;
+
+    // Start the guest daemon
+    virtual TransportResult start_daemon(
+        const std::string& serial_or_avd,
+        const std::string& guest_staging_path,
+        const std::string& guest_port) = 0;
+
+    // Verify daemon is reachable and responsive
+    virtual TransportResult verify_connection(
+        const std::string& serial_or_avd,
+        uint16_t host_port,
+        std::chrono::milliseconds timeout) = 0;
+
+    // Check if target device is online and compatible
+    virtual TransportResult validate_target(
+        const std::string& serial_or_avd,
+        fang::guest::GuestTargetAbi expected_abi) = 0;
+
+    // Get transport-specific configuration
+    virtual std::string_view transport_name() const noexcept = 0;
+    
+    // Check if live operations are authorized
+    virtual bool is_live_authorized() const noexcept = 0;
+    
+    // Set authorization token
+    virtual void set_authorization(std::string token) = 0;
+};
+
 // Deterministic in-memory / loopback forwarder for offline unit testing and test daemons.
 class LoopbackTestForwarder final : public IGuestEndpointForwarder {
 public:
@@ -90,26 +180,154 @@ private:
     bool simulate_failure_{false};
 };
 
-// Concrete ADB port forwarder contract for reference runtime emulator sessions.
-// Evaluates target serial and prepares forwarding mapping without unauthorized live ADB execution.
-class AdbPortForwarder final : public IGuestEndpointForwarder {
+// Concrete ADB transport implementation for live guest operations.
+// Requires explicit authorization token to enable live ADB execution.
+class AdbTransport final : public IGuestTransport {
 public:
-    explicit AdbPortForwarder(uint16_t preferred_host_port = 0);
-
+    explicit AdbTransport(const AdbTransportConfig& config = {});
+    
+    // IGuestEndpointForwarder interface
     bool setup_forwarding(
         const std::string& serial_or_avd,
         uint16_t guest_port,
         GuestEndpointMapping& out_mapping) override;
-
+    
     void teardown_forwarding(GuestEndpointMapping& mapping) override;
     bool is_forwarding_active(const GuestEndpointMapping& mapping) const noexcept override;
-    std::string_view forwarder_name() const noexcept override { return "adb-forward"; }
+    std::string_view forwarder_name() const noexcept override { return "adb-transport"; }
 
-    // Generates the deterministic ADB CLI command string for reference
+    // IGuestTransport interface
+    TransportResult push_binary(
+        const std::string& serial_or_avd,
+        const std::filesystem::path& local_artifact_path,
+        const std::string& guest_staging_path,
+        uint64_t expected_size,
+        const std::string& expected_sha256) override;
+    
+    TransportResult verify_remote_artifact(
+        const std::string& serial_or_avd,
+        const std::string& guest_staging_path,
+        uint64_t expected_size,
+        const std::string& expected_sha256) override;
+    
+    TransportResult start_daemon(
+        const std::string& serial_or_avd,
+        const std::string& guest_staging_path,
+        const std::string& guest_port) override;
+    
+    TransportResult verify_connection(
+        const std::string& serial_or_avd,
+        uint16_t host_port,
+        std::chrono::milliseconds timeout) override;
+    
+    TransportResult validate_target(
+        const std::string& serial_or_avd,
+        fang::guest::GuestTargetAbi expected_abi) override;
+    
+    std::string_view transport_name() const noexcept override { return "adb-transport"; }
+    bool is_live_authorized() const noexcept override { return live_authorized_; }
+    void set_authorization(std::string token) override;
+
+    // Static helper for ADB command formatting
     static std::string format_adb_forward_cmd(const std::string& serial, uint16_t host_port, uint16_t guest_port);
+    static std::string format_adb_push_cmd(const std::string& serial, const std::string& local, const std::string& remote);
+    static std::string format_adb_shell_cmd(const std::string& serial, const std::string& command);
 
 private:
-    uint16_t preferred_host_port_{0};
+    AdbTransportConfig config_;
+    std::string authorization_token_;
+    bool live_authorized_{false};
+    
+    static std::filesystem::path discover_adb_executable();
+    TransportResult execute_adb_command(const std::vector<std::string>& args, std::chrono::milliseconds timeout, std::string* output = nullptr) const;
+    bool verify_adb_available() const;
+};
+
+// Deterministic fake ADB transport for offline unit testing.
+// Supports controlled outcomes for every operation.
+class FakeAdbTransport final : public IGuestTransport {
+public:
+    explicit FakeAdbTransport() = default;
+    
+    // IGuestEndpointForwarder interface
+    bool setup_forwarding(
+        const std::string& serial_or_avd,
+        uint16_t guest_port,
+        GuestEndpointMapping& out_mapping) override;
+    
+    void teardown_forwarding(GuestEndpointMapping& mapping) override;
+    bool is_forwarding_active(const GuestEndpointMapping& mapping) const noexcept override;
+    std::string_view forwarder_name() const noexcept override { return "fake-adb-transport"; }
+
+    // IGuestTransport interface
+    TransportResult push_binary(
+        const std::string& serial_or_avd,
+        const std::filesystem::path& local_artifact_path,
+        const std::string& guest_staging_path,
+        uint64_t expected_size,
+        const std::string& expected_sha256) override;
+    
+    TransportResult verify_remote_artifact(
+        const std::string& serial_or_avd,
+        const std::string& guest_staging_path,
+        uint64_t expected_size,
+        const std::string& expected_sha256) override;
+    
+    TransportResult start_daemon(
+        const std::string& serial_or_avd,
+        const std::string& guest_staging_path,
+        const std::string& guest_port) override;
+    
+    TransportResult verify_connection(
+        const std::string& serial_or_avd,
+        uint16_t host_port,
+        std::chrono::milliseconds timeout) override;
+    
+    TransportResult validate_target(
+        const std::string& serial_or_avd,
+        fang::guest::GuestTargetAbi expected_abi) override;
+    
+    std::string_view transport_name() const noexcept override { return "fake-adb-transport"; }
+    bool is_live_authorized() const noexcept override { return true; }  // Always authorized for testing
+    void set_authorization(std::string /*token*/) override {}
+
+    // Test control interface
+    void set_push_result(TransportResult result) { push_result_ = std::move(result); }
+    void set_verify_result(TransportResult result) { verify_result_ = std::move(result); }
+    void set_start_daemon_result(TransportResult result) { start_daemon_result_ = std::move(result); }
+    void set_verify_connection_result(TransportResult result) { verify_connection_result_ = std::move(result); }
+    void set_validate_target_result(TransportResult result) { validate_target_result_ = std::move(result); }
+    void set_setup_forwarding_result(bool success, std::string diag = "") { setup_success_ = success; setup_diag_ = std::move(diag); }
+    
+    // Track calls for verification
+    struct CallLog {
+        std::string operation;
+        std::string serial;
+        std::string detail;
+        std::chrono::system_clock::time_point timestamp;
+    };
+    const std::vector<CallLog>& call_log() const noexcept { return call_log_; }
+    void clear_call_log() { call_log_.clear(); }
+    
+    // Simulate device state
+    void set_device_online(bool online) { device_online_ = online; }
+    void set_device_abi(fang::guest::GuestTargetAbi abi) { device_abi_ = abi; }
+    void set_device_serial(const std::string& serial) { device_serial_ = serial; }
+
+private:
+    TransportResult push_result_ = TransportResult::ok("Fake push succeeded");
+    TransportResult verify_result_ = TransportResult::ok("Fake verify succeeded");
+    TransportResult start_daemon_result_ = TransportResult::ok("Fake daemon started");
+    TransportResult verify_connection_result_ = TransportResult::ok("Fake connection verified");
+    TransportResult validate_target_result_ = TransportResult::ok("Fake target validated");
+    bool setup_success_ = true;
+    std::string setup_diag_ = "Fake forwarding active";
+    std::vector<CallLog> call_log_;
+    bool device_online_ = true;
+    fang::guest::GuestTargetAbi device_abi_ = fang::guest::GuestTargetAbi::X86_64;
+    std::string device_serial_ = "emulator-5554";
+    
+    void log_call(const std::string& op, const std::string& serial, const std::string& detail);
 };
 
 // Concrete forwarder when guest reachability is blocked pending runtime/network provisioning.

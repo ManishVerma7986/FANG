@@ -90,11 +90,11 @@ void test_forwarder_abstractions() {
         require(mapping.state == ForwardingState::Failed, "Failed state");
     }
 
-    // AdbPortForwarder
+    // FakeAdbTransport (replaces AdbPortForwarder for testing)
     {
-        AdbPortForwarder adb_fwd(24800);
-        require(adb_fwd.forwarder_name() == "adb-forward", "Adb forwarder name");
-        std::string cmd = AdbPortForwarder::format_adb_forward_cmd("emulator-5554", 24800, 24800);
+        FakeAdbTransport adb_fwd;
+        require(adb_fwd.forwarder_name() == "fake-adb-transport", "Fake ADB transport name");
+        std::string cmd = AdbTransport::format_adb_forward_cmd("emulator-5554", 24800, 24800);
         require(cmd == "adb -s emulator-5554 forward tcp:24800 tcp:24800", "Formatted adb cmd check");
 
         GuestEndpointMapping mapping;
@@ -103,12 +103,11 @@ void test_forwarder_abstractions() {
         require(!ok, "Invalid serial rejected");
         require(mapping.state == ForwardingState::Failed, "Failed state on invalid serial");
 
-        // Valid serial: offline policy must safely mark as Blocked rather than executing live adb
+        // Valid serial: by default FakeAdbTransport succeeds
         ok = adb_fwd.setup_forwarding("emulator-5554", 24800, mapping);
-        require(!ok, "Live adb execution blocked offline");
-        require(mapping.state == ForwardingState::Blocked, "Blocked state");
-        require(!mapping.is_live_forwarding_active, "Not live active");
-        require(mapping.diagnostic.find("unauthorized") != std::string::npos, "Diagnostic identifies unauthorized live ADB");
+        require(ok, "Fake transport accepts valid serial");
+        require(mapping.state == ForwardingState::Active, "Active state");
+        require(mapping.is_live_forwarding_active, "Live active (fake)");
     }
 
     // BlockedGuestForwarder
@@ -905,7 +904,7 @@ void test_studio_session_deployment_diagnostic_integration() {
     auto mock_deployment = std::make_shared<MockGuestDeploymentCoordinator>(
         GuestDeploymentPhase::BlockedMissingToolchain,
         "Android NDK r25+ missing; cross-compilation blocked.");
-    auto forwarder = std::make_shared<AdbPortForwarder>(static_cast<uint16_t>(24800));
+    auto forwarder = std::make_shared<FakeAdbTransport>();
 
     StudioSessionController controller(
         nullptr, nullptr, nullptr, nullptr,
@@ -1513,7 +1512,8 @@ void test_deployment_plan_execution_offline_boundary() {
     std::string error;
     bool success = false;
     try {
-        success = GuestDeploymentCoordinator::execute_deployment_plan("emulator-5554", target, report, plan, &error);
+        auto fake_transport = std::make_shared<FakeAdbTransport>();
+        success = GuestDeploymentCoordinator::execute_deployment_plan("emulator-5554", target, report, plan, fake_transport, &error);
     } catch (const std::exception& ex) {
         std::cerr << "  DEBUG: EXCEPTION: " << ex.what() << std::endl;
         throw;
@@ -1608,8 +1608,9 @@ void test_deployment_plan_deterministic_and_idempotent() {
     std::string error1, error2;
     auto plan1_copy = plan1;
     auto plan2_copy = plan2;
-    bool success1 = GuestDeploymentCoordinator::execute_deployment_plan("emulator-5554", target, report, plan1_copy, &error1);
-    bool success2 = GuestDeploymentCoordinator::execute_deployment_plan("emulator-5554", target, report, plan2_copy, &error2);
+    auto fake_transport = std::make_shared<FakeAdbTransport>();
+    bool success1 = GuestDeploymentCoordinator::execute_deployment_plan("emulator-5554", target, report, plan1_copy, fake_transport, &error1);
+    bool success2 = GuestDeploymentCoordinator::execute_deployment_plan("emulator-5554", target, report, plan2_copy, fake_transport, &error2);
 
     require(success1 == success2, "Same success result");
     require(!success1, "Both fail offline");

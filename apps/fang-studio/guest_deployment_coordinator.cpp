@@ -10,6 +10,7 @@
 #include <array>
 #include <memory>
 #include <optional>
+#include <optional>
 
 namespace fang::studio {
 
@@ -1278,13 +1279,24 @@ bool GuestDeploymentCoordinator::deploy_to_guest(
         return true;
     }
 
-    // Android guest target: safely enforce offline boundaries
+    // Android guest target: check if we have an authorized transport
+    if (transport_ && transport_->is_live_authorized()) {
+        // Execute deployment plan with real transport
+        std::string plan_error;
+        bool success = execute_deployment_plan_with_transport(serial_or_avd, target, out_report, out_report.deployment_plan, &plan_error);
+        if (!success && !plan_error.empty()) {
+            out_report.diagnostic = plan_error;
+        }
+        return success;
+    }
+
+    // No authorized transport: safely enforce offline boundaries
     // Live guest deployment via ADB push is strictly blocked offline
     out_report.phase = GuestDeploymentPhase::DeploymentBlockedOffline;
     out_report.is_deployed = false;
     out_report.diagnostic = "Live guest deployment via ADB push ('adb -s " + serial_or_avd +
         " push " + out_report.resolved_artifact_path + " " + target.guest_install_path +
-        "') is blocked offline. Live deployment remains unauthorized.";
+        "') is blocked offline. Live deployment remains unauthorized. Configure authorized transport to enable live deployment.";
     
     // Update deployment plan to reflect offline block
     for (auto& step : out_report.deployment_plan.steps) {
@@ -1425,7 +1437,7 @@ DeploymentPlan GuestDeploymentCoordinator::create_deployment_plan(const GuestDep
     return plan;
 }
 
-bool GuestDeploymentCoordinator::execute_deployment_plan(
+bool GuestDeploymentCoordinator::execute_deployment_plan_with_transport(
     const std::string& serial_or_avd,
     const GuestDeploymentTarget& target,
     const GuestDeploymentReport& readiness_report,
@@ -1435,6 +1447,16 @@ bool GuestDeploymentCoordinator::execute_deployment_plan(
     if (readiness_report.phase != GuestDeploymentPhase::ArtifactReady) {
         if (error) *error = "Cannot execute deployment plan: artifact not ready (phase: " + 
             std::string(guest_deployment_phase_name(readiness_report.phase)) + ")";
+        return false;
+    }
+
+    if (!transport_) {
+        if (error) *error = "No transport configured for live deployment";
+        return false;
+    }
+
+    if (!transport_->is_live_authorized()) {
+        if (error) *error = "Transport not authorized for live operations";
         return false;
     }
 
@@ -1466,7 +1488,6 @@ bool GuestDeploymentCoordinator::execute_deployment_plan(
         if (step.status == DeploymentPlanStepStatus::Failed) {
             if (error) *error = "Provenance check failed: " + step.diagnostic;
             step.completed_at = std::chrono::system_clock::now();
-            // Mark remaining steps as Skipped
             for (size_t i = 3; i < plan.steps.size(); ++i) {
                 plan.steps[i].status = DeploymentPlanStepStatus::Skipped;
                 plan.steps[i].diagnostic = "Skipped due to provenance check failure";
@@ -1480,32 +1501,372 @@ bool GuestDeploymentCoordinator::execute_deployment_plan(
         step.completed_at = std::chrono::system_clock::now();
     }
 
-    // Step 4: SetupTransport
+    // Step 4: SetupTransport - use real transport
     if (plan.steps.size() > 3) {
         auto& step = plan.steps[3];
         step.status = DeploymentPlanStepStatus::InProgress;
         step.started_at = std::chrono::system_clock::now();
 
-        // For offline safety, we simulate the transport setup but don't execute live ADB
-        // In a real deployment, this would call the IGuestEndpointForwarder
-        step.diagnostic = "Transport setup simulated (offline mode): ADB port forward command prepared";
-        step.error_code = "TRANSPORT_SETUP_OFFLINE";
-        step.status = DeploymentPlanStepStatus::Failed;  // Mark as failed because we can't actually do it offline
-        step.completed_at = std::chrono::system_clock::now();
-        plan.has_failures = true;
-        plan.overall_error_code = "TRANSPORT_SETUP_OFFLINE";
-        if (error) *error = "Live transport setup blocked offline; deployment plan cannot complete without live ADB";
+        GuestEndpointMapping mapping;
+        bool success = transport_->setup_forwarding(serial_or_avd, 24800, mapping);
+        if (success) {
+            step.status = DeploymentPlanStepStatus::Completed;
+            step.diagnostic = mapping.diagnostic;
+            step.completed_at = std::chrono::system_clock::now();
+            // Store mapping for later steps
+            step.detail = std::to_string(mapping.host_port); // Reuse detail for host port
+        } else {
+            step.status = DeploymentPlanStepStatus::Failed;
+            step.error_code = "TRANSPORT_SETUP_FAILED";
+            step.diagnostic = mapping.diagnostic;
+            step.completed_at = std::chrono::system_clock::now();
+            plan.has_failures = true;
+            plan.overall_error_code = "TRANSPORT_SETUP_FAILED";
+            if (error) *error = "Transport setup failed: " + mapping.diagnostic;
+            for (size_t i = 4; i < plan.steps.size(); ++i) {
+                plan.steps[i].status = DeploymentPlanStepStatus::Skipped;
+                plan.steps[i].diagnostic = "Skipped due to transport setup failure";
+            }
+            plan.completed_at = std::chrono::system_clock::now();
+            plan.is_complete = true;
+            return false;
+        }
     }
 
-    // Remaining steps are not executed in offline mode
-    for (size_t i = 4; i < plan.steps.size(); ++i) {
-        plan.steps[i].status = DeploymentPlanStepStatus::Skipped;
-        plan.steps[i].diagnostic = "Skipped due to offline transport setup failure";
+    // Step 5: PushBinary
+    if (plan.steps.size() > 4) {
+        auto& step = plan.steps[4];
+        step.status = DeploymentPlanStepStatus::InProgress;
+        step.started_at = std::chrono::system_clock::now();
+
+        // Extract host port from previous step
+        uint16_t host_port = 24800;
+        if (plan.steps.size() > 3 && !plan.steps[3].detail.empty()) {
+            try {
+                host_port = static_cast<uint16_t>(std::stoi(plan.steps[3].detail));
+            } catch (...) {
+                host_port = 24800;
+            }
+        }
+
+        auto push_result = transport_->push_binary(
+            serial_or_avd,
+            readiness_report.resolved_artifact_path,
+            target.guest_install_path,
+            readiness_report.artifact_size_bytes,
+            readiness_report.artifact_sha256);
+
+        if (push_result.success) {
+            step.status = DeploymentPlanStepStatus::Completed;
+            step.diagnostic = push_result.diagnostic;
+            step.completed_at = std::chrono::system_clock::now();
+        } else {
+            step.status = DeploymentPlanStepStatus::Failed;
+            step.error_code = push_result.error_code;
+            step.diagnostic = push_result.diagnostic;
+            step.completed_at = std::chrono::system_clock::now();
+            plan.has_failures = true;
+            plan.overall_error_code = push_result.error_code;
+            if (error) *error = "Binary push failed: " + push_result.diagnostic;
+            for (size_t i = 5; i < plan.steps.size(); ++i) {
+                plan.steps[i].status = DeploymentPlanStepStatus::Skipped;
+                plan.steps[i].diagnostic = "Skipped due to binary push failure";
+            }
+            plan.completed_at = std::chrono::system_clock::now();
+            plan.is_complete = true;
+            return false;
+        }
     }
 
-    plan.completed_at = std::chrono::system_clock::now();
+    // Step 6: StartDaemon
+    if (plan.steps.size() > 5) {
+        auto& step = plan.steps[5];
+        step.status = DeploymentPlanStepStatus::InProgress;
+        step.started_at = std::chrono::system_clock::now();
+
+        auto start_result = transport_->start_daemon(
+            serial_or_avd,
+            target.guest_install_path,
+            "24800");
+
+        if (start_result.success) {
+            step.status = DeploymentPlanStepStatus::Completed;
+            step.diagnostic = start_result.diagnostic;
+            step.completed_at = std::chrono::system_clock::now();
+        } else {
+            step.status = DeploymentPlanStepStatus::Failed;
+            step.error_code = start_result.error_code;
+            step.diagnostic = start_result.diagnostic;
+            step.completed_at = std::chrono::system_clock::now();
+            plan.has_failures = true;
+            plan.overall_error_code = start_result.error_code;
+            if (error) *error = "Daemon startup failed: " + start_result.diagnostic;
+            for (size_t i = 6; i < plan.steps.size(); ++i) {
+                plan.steps[i].status = DeploymentPlanStepStatus::Skipped;
+                plan.steps[i].diagnostic = "Skipped due to daemon startup failure";
+            }
+            plan.completed_at = std::chrono::system_clock::now();
+            plan.is_complete = true;
+            return false;
+        }
+    }
+
+    // Step 7: VerifyConnection
+    if (plan.steps.size() > 6) {
+        auto& step = plan.steps[6];
+        step.status = DeploymentPlanStepStatus::InProgress;
+        step.started_at = std::chrono::system_clock::now();
+
+        // Extract host port from step 3
+        uint16_t host_port = 24800;
+        if (plan.steps.size() > 3 && !plan.steps[3].detail.empty()) {
+            try {
+                host_port = static_cast<uint16_t>(std::stoi(plan.steps[3].detail));
+            } catch (...) {
+                host_port = 24800;
+            }
+        }
+
+        auto conn_result = transport_->verify_connection(serial_or_avd, host_port, std::chrono::milliseconds(10000));
+        if (conn_result.success) {
+            step.status = DeploymentPlanStepStatus::Completed;
+            step.diagnostic = conn_result.diagnostic;
+            step.completed_at = std::chrono::system_clock::now();
+        } else {
+            step.status = DeploymentPlanStepStatus::Failed;
+            step.error_code = conn_result.error_code;
+            step.diagnostic = conn_result.diagnostic;
+            step.completed_at = std::chrono::system_clock::now();
+            plan.has_failures = true;
+            plan.overall_error_code = conn_result.error_code;
+            if (error) *error = "Connection verification failed: " + conn_result.diagnostic;
+            plan.completed_at = std::chrono::system_clock::now();
+            plan.is_complete = true;
+            return false;
+        }
+    }
+
+    // All steps completed successfully
+    plan.has_failures = false;
+    plan.overall_error_code.clear();
     plan.is_complete = true;
-    return false;  // Always returns false in offline mode
+    plan.completed_at = std::chrono::system_clock::now();
+    return true;
+}
+
+// Static version that takes an explicit transport parameter
+bool GuestDeploymentCoordinator::execute_deployment_plan(
+    const std::string& serial_or_avd,
+    const GuestDeploymentTarget& target,
+    const GuestDeploymentReport& readiness_report,
+    DeploymentPlan& plan,
+    std::shared_ptr<IGuestTransport> transport,
+    std::string* error) {
+
+    if (readiness_report.phase != GuestDeploymentPhase::ArtifactReady) {
+        if (error) *error = "Cannot execute deployment plan: artifact not ready (phase: " + 
+            std::string(guest_deployment_phase_name(readiness_report.phase)) + ")";
+        return false;
+    }
+
+    if (!transport) {
+        if (error) *error = "No transport provided for live deployment";
+        return false;
+    }
+
+    if (!transport->is_live_authorized()) {
+        if (error) *error = "Transport not authorized for live operations";
+        return false;
+    }
+
+    plan.started_at = std::chrono::system_clock::now();
+
+    // Step 1: ValidateArtifact - already validated
+    if (!plan.steps.empty()) {
+        auto& step = plan.steps[0];
+        step.status = DeploymentPlanStepStatus::Completed;
+        step.started_at = plan.started_at;
+        step.completed_at = std::chrono::system_clock::now();
+    }
+
+    // Step 2: VerifyManifest - already validated
+    if (plan.steps.size() > 1) {
+        auto& step = plan.steps[1];
+        if (step.is_required) {
+            step.status = DeploymentPlanStepStatus::Completed;
+            step.started_at = std::chrono::system_clock::now();
+            step.completed_at = std::chrono::system_clock::now();
+        } else {
+            step.status = DeploymentPlanStepStatus::Skipped;
+        }
+    }
+
+    // Step 3: CheckProvenance - already assessed
+    if (plan.steps.size() > 2) {
+        auto& step = plan.steps[2];
+        if (step.status == DeploymentPlanStepStatus::Failed) {
+            if (error) *error = "Provenance check failed: " + step.diagnostic;
+            step.completed_at = std::chrono::system_clock::now();
+            for (size_t i = 3; i < plan.steps.size(); ++i) {
+                plan.steps[i].status = DeploymentPlanStepStatus::Skipped;
+                plan.steps[i].diagnostic = "Skipped due to provenance check failure";
+            }
+            plan.completed_at = std::chrono::system_clock::now();
+            plan.is_complete = true;
+            return false;
+        }
+        step.status = DeploymentPlanStepStatus::Completed;
+        step.started_at = std::chrono::system_clock::now();
+        step.completed_at = std::chrono::system_clock::now();
+    }
+
+    // Step 4: SetupTransport - use provided transport
+    if (plan.steps.size() > 3) {
+        auto& step = plan.steps[3];
+        step.status = DeploymentPlanStepStatus::InProgress;
+        step.started_at = std::chrono::system_clock::now();
+
+        GuestEndpointMapping mapping;
+        bool success = transport->setup_forwarding(serial_or_avd, 24800, mapping);
+        if (success) {
+            step.status = DeploymentPlanStepStatus::Completed;
+            step.diagnostic = mapping.diagnostic;
+            step.completed_at = std::chrono::system_clock::now();
+            step.detail = std::to_string(mapping.host_port);
+        } else {
+            step.status = DeploymentPlanStepStatus::Failed;
+            step.error_code = "TRANSPORT_SETUP_FAILED";
+            step.diagnostic = mapping.diagnostic;
+            step.completed_at = std::chrono::system_clock::now();
+            plan.has_failures = true;
+            plan.overall_error_code = "TRANSPORT_SETUP_FAILED";
+            if (error) *error = "Transport setup failed: " + mapping.diagnostic;
+            for (size_t i = 4; i < plan.steps.size(); ++i) {
+                plan.steps[i].status = DeploymentPlanStepStatus::Skipped;
+                plan.steps[i].diagnostic = "Skipped due to transport setup failure";
+            }
+            plan.completed_at = std::chrono::system_clock::now();
+            plan.is_complete = true;
+            return false;
+        }
+    }
+
+    // Step 5: PushBinary
+    if (plan.steps.size() > 4) {
+        auto& step = plan.steps[4];
+        step.status = DeploymentPlanStepStatus::InProgress;
+        step.started_at = std::chrono::system_clock::now();
+
+        uint16_t host_port = 24800;
+        if (plan.steps.size() > 3 && !plan.steps[3].detail.empty()) {
+            try {
+                host_port = static_cast<uint16_t>(std::stoi(plan.steps[3].detail));
+            } catch (...) {
+                host_port = 24800;
+            }
+        }
+
+        auto push_result = transport->push_binary(
+            serial_or_avd,
+            readiness_report.resolved_artifact_path,
+            target.guest_install_path,
+            readiness_report.artifact_size_bytes,
+            readiness_report.artifact_sha256);
+
+        if (push_result.success) {
+            step.status = DeploymentPlanStepStatus::Completed;
+            step.diagnostic = push_result.diagnostic;
+            step.completed_at = std::chrono::system_clock::now();
+        } else {
+            step.status = DeploymentPlanStepStatus::Failed;
+            step.error_code = push_result.error_code;
+            step.diagnostic = push_result.diagnostic;
+            step.completed_at = std::chrono::system_clock::now();
+            plan.has_failures = true;
+            plan.overall_error_code = push_result.error_code;
+            if (error) *error = "Binary push failed: " + push_result.diagnostic;
+            for (size_t i = 5; i < plan.steps.size(); ++i) {
+                plan.steps[i].status = DeploymentPlanStepStatus::Skipped;
+                plan.steps[i].diagnostic = "Skipped due to binary push failure";
+            }
+            plan.completed_at = std::chrono::system_clock::now();
+            plan.is_complete = true;
+            return false;
+        }
+    }
+
+    // Step 6: StartDaemon
+    if (plan.steps.size() > 5) {
+        auto& step = plan.steps[5];
+        step.status = DeploymentPlanStepStatus::InProgress;
+        step.started_at = std::chrono::system_clock::now();
+
+        auto start_result = transport->start_daemon(
+            serial_or_avd,
+            target.guest_install_path,
+            "24800");
+
+        if (start_result.success) {
+            step.status = DeploymentPlanStepStatus::Completed;
+            step.diagnostic = start_result.diagnostic;
+            step.completed_at = std::chrono::system_clock::now();
+        } else {
+            step.status = DeploymentPlanStepStatus::Failed;
+            step.error_code = start_result.error_code;
+            step.diagnostic = start_result.diagnostic;
+            step.completed_at = std::chrono::system_clock::now();
+            plan.has_failures = true;
+            plan.overall_error_code = start_result.error_code;
+            if (error) *error = "Daemon startup failed: " + start_result.diagnostic;
+            for (size_t i = 6; i < plan.steps.size(); ++i) {
+                plan.steps[i].status = DeploymentPlanStepStatus::Skipped;
+                plan.steps[i].diagnostic = "Skipped due to daemon startup failure";
+            }
+            plan.completed_at = std::chrono::system_clock::now();
+            plan.is_complete = true;
+            return false;
+        }
+    }
+
+    // Step 7: VerifyConnection
+    if (plan.steps.size() > 6) {
+        auto& step = plan.steps[6];
+        step.status = DeploymentPlanStepStatus::InProgress;
+        step.started_at = std::chrono::system_clock::now();
+
+        uint16_t host_port = 24800;
+        if (plan.steps.size() > 3 && !plan.steps[3].detail.empty()) {
+            try {
+                host_port = static_cast<uint16_t>(std::stoi(plan.steps[3].detail));
+            } catch (...) {
+                host_port = 24800;
+            }
+        }
+
+        auto conn_result = transport->verify_connection(serial_or_avd, host_port, std::chrono::milliseconds(10000));
+        if (conn_result.success) {
+            step.status = DeploymentPlanStepStatus::Completed;
+            step.diagnostic = conn_result.diagnostic;
+            step.completed_at = std::chrono::system_clock::now();
+        } else {
+            step.status = DeploymentPlanStepStatus::Failed;
+            step.error_code = conn_result.error_code;
+            step.diagnostic = conn_result.diagnostic;
+            step.completed_at = std::chrono::system_clock::now();
+            plan.has_failures = true;
+            plan.overall_error_code = conn_result.error_code;
+            if (error) *error = "Connection verification failed: " + conn_result.diagnostic;
+            plan.completed_at = std::chrono::system_clock::now();
+            plan.is_complete = true;
+            return false;
+        }
+    }
+
+    plan.has_failures = false;
+    plan.overall_error_code.clear();
+    plan.is_complete = true;
+    plan.completed_at = std::chrono::system_clock::now();
+    return true;
 }
 
 } // namespace fang::studio

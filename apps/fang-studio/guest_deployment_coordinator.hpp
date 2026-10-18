@@ -1,6 +1,7 @@
 #pragma once
 
 #include "guest_manifest.hpp"
+#include "guest_endpoint_forwarder.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -69,6 +70,7 @@ struct GuestDeploymentTarget {
     std::string build_config{"Release"};
     uint32_t android_api_level{26};
     bool require_privileged_backend{false};
+    uint16_t guest_port{24800};
 };
 
 enum class DeploymentPlanStepType : uint8_t {
@@ -121,6 +123,7 @@ struct DeploymentPlanStep {
     std::chrono::system_clock::time_point completed_at;
     bool is_required{true};
     std::string error_code;  // Machine-readable error code for failure diagnosis
+    std::string detail;      // Additional detail (e.g., host port for SetupTransport)
 };
 
 struct DeploymentPlan {
@@ -219,6 +222,10 @@ public:
         GuestDeploymentReport& report) override;
     std::string_view coordinator_name() const noexcept override { return "guest-deployment-coordinator"; }
 
+    // Transport integration
+    void set_transport(std::shared_ptr<IGuestTransport> transport) noexcept { transport_ = std::move(transport); }
+    std::shared_ptr<IGuestTransport> transport() const noexcept { return transport_; }
+
     // Helpers
     static bool inspect_binary_format(
         const std::string& file_path,
@@ -269,7 +276,19 @@ public:
         const GuestDeploymentTarget& target,
         const GuestDeploymentReport& readiness_report,
         DeploymentPlan& plan,
+        std::shared_ptr<IGuestTransport> transport,
         std::string* error = nullptr);
+    
+    // New method for executing with transport
+    bool execute_deployment_plan_with_transport(
+        const std::string& serial_or_avd,
+        const GuestDeploymentTarget& target,
+        const GuestDeploymentReport& readiness_report,
+        DeploymentPlan& plan,
+        std::string* error = nullptr);
+
+private:
+    std::shared_ptr<IGuestTransport> transport_;
 };
 
 } // namespace fang::studio
