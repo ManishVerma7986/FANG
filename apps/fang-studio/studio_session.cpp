@@ -136,6 +136,11 @@ void StudioSessionController::notify_shutdown() {
     }
     if (mapping_engine_) {
         mapping_engine_->reset_all_state();
+        if (auto bridge = mapping_engine_->guest_bridge()) {
+            if (auto client = std::dynamic_pointer_cast<GuestInputBridgeClient>(bridge)) {
+                client->stop();
+            }
+        }
     }
     if (video_transport_) {
         video_transport_->stop();
@@ -168,6 +173,11 @@ void StudioSessionController::handle_session_change(const fang::broker::RuntimeS
     }
     if (mapping_engine_) {
         mapping_engine_->reset_all_state();
+        if (auto bridge = mapping_engine_->guest_bridge()) {
+            if (auto client = std::dynamic_pointer_cast<GuestInputBridgeClient>(bridge)) {
+                client->reset_generation(new_runtime.generation_id);
+            }
+        }
     }
 
     // Release existing video transport and purge stale frames

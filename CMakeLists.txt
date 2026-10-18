@@ -111,6 +111,10 @@ add_executable(fang-studio WIN32
     apps/fang-studio/touch_contact_model.cpp
     apps/fang-studio/input_profile.cpp
     apps/fang-studio/input_mapping_engine.cpp
+    apps/fang-studio/input_ipc_protocol.cpp
+    apps/fang-studio/input_transport.cpp
+    apps/fang-studio/fake_guest_input_endpoint.cpp
+    apps/fang-studio/guest_input_bridge.cpp
 )
 target_link_libraries(fang-studio PRIVATE fang_core fang_runtime fang_runtime_supervisor_client
     fang_warnings User32 Gdi32 d3d11 dxgi d3dcompiler)
@@ -287,6 +291,10 @@ if(BUILD_TESTING)
         apps/fang-studio/touch_contact_model.cpp
         apps/fang-studio/input_profile.cpp
         apps/fang-studio/input_mapping_engine.cpp
+        apps/fang-studio/input_ipc_protocol.cpp
+        apps/fang-studio/input_transport.cpp
+        apps/fang-studio/fake_guest_input_endpoint.cpp
+        apps/fang-studio/guest_input_bridge.cpp
     )
     target_include_directories(fang-studio-player-tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-studio"
@@ -309,6 +317,10 @@ if(BUILD_TESTING)
         apps/fang-studio/touch_contact_model.cpp
         apps/fang-studio/input_profile.cpp
         apps/fang-studio/input_mapping_engine.cpp
+        apps/fang-studio/input_ipc_protocol.cpp
+        apps/fang-studio/input_transport.cpp
+        apps/fang-studio/fake_guest_input_endpoint.cpp
+        apps/fang-studio/guest_input_bridge.cpp
     )
     target_include_directories(fang-studio-video-tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-studio"

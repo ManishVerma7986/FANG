@@ -11,6 +11,9 @@
 #include "guest_input_bridge.hpp"
 #include "input_profile.hpp"
 #include "input_mapping_engine.hpp"
+#include "input_ipc_protocol.hpp"
+#include "input_transport.hpp"
+#include "fake_guest_input_endpoint.hpp"
 
 #include <chrono>
 #include <condition_variable>
@@ -1537,6 +1540,499 @@ void test_input_queue_overflow_no_stuck_state() {
     require(!engine.is_key_held('S'), "S released.");
 }
 
+void test_ipc_protocol_encoding_decoding_and_versioning() {
+    // 1. WireHeader encoding and decoding
+    WireHeader hdr;
+    hdr.magic = input_protocol_magic;
+    hdr.version = input_protocol_version;
+    hdr.type = InputMessageType::TouchFrame;
+    hdr.sequence_number = 42;
+    hdr.timestamp_ms = 123456789;
+    hdr.payload_size = 64;
+    hdr.status_or_flags = 0;
+
+    auto hdr_bytes = encode_wire_header(hdr);
+    require(hdr_bytes.size() == input_wire_header_size, "Header bytes must equal wire header size.");
+
+    WireHeader decoded_hdr;
+    auto hdr_err = decode_wire_header(hdr_bytes, decoded_hdr);
+    require(hdr_err == InputProtocolError::None, "Header decode should succeed.");
+    require(decoded_hdr.magic == input_protocol_magic, "Header magic should match.");
+    require(decoded_hdr.version == input_protocol_version, "Header version should match.");
+    require(decoded_hdr.type == InputMessageType::TouchFrame, "Header type should match.");
+    require(decoded_hdr.sequence_number == 42, "Header seq should match.");
+    require(decoded_hdr.timestamp_ms == 123456789, "Header ts should match.");
+    require(decoded_hdr.payload_size == 64, "Header payload size should match.");
+
+    // Version mismatch rejection
+    hdr.version = 99;
+    auto bad_ver_bytes = encode_wire_header(hdr);
+    require(decode_wire_header(bad_ver_bytes, decoded_hdr) == InputProtocolError::UnsupportedVersion,
+        "Version mismatch must return UnsupportedVersion.");
+
+    // Magic mismatch rejection
+    hdr.version = input_protocol_version;
+    hdr.magic = 0xDEADBEEF;
+    auto bad_magic_bytes = encode_wire_header(hdr);
+    require(decode_wire_header(bad_magic_bytes, decoded_hdr) == InputProtocolError::InvalidMagic,
+        "Invalid magic must return InvalidMagic.");
+
+    // Unknown message type rejection
+    hdr.magic = input_protocol_magic;
+    hdr_bytes = encode_wire_header(hdr);
+    hdr_bytes[6] = static_cast<std::byte>(0xFF);
+    hdr_bytes[7] = static_cast<std::byte>(0x00);
+    require(decode_wire_header(hdr_bytes, decoded_hdr) == InputProtocolError::UnknownMessageType,
+        "Unknown message type must return UnknownMessageType.");
+
+    // 2. Hello / HelloAck round-trip
+    HelloPayload hello{input_protocol_version, 1080, 1920, "sess-1", "gen-1"};
+    auto hello_pkt = encode_hello_message(1, 100, hello);
+    require(hello_pkt.size() > input_wire_header_size, "Hello packet must have payload.");
+    std::span<const std::byte> hello_payload(hello_pkt.data() + input_wire_header_size, hello_pkt.size() - input_wire_header_size);
+    InputProtocolError err = InputProtocolError::None;
+    auto dec_hello = decode_hello_message(hello_payload, err);
+    require(dec_hello.has_value(), "Hello decode should succeed.");
+    require(dec_hello->display_width == 1080 && dec_hello->display_height == 1920, "Display dims match.");
+    require(dec_hello->session_id == "sess-1", "Session ID matches.");
+    require(dec_hello->generation_id == "gen-1", "Generation ID matches.");
+
+    HelloAckPayload hello_ack{input_protocol_version, InputProtocolError::None, 10, 0x07, "sess-1", "gen-1"};
+    auto hello_ack_pkt = encode_hello_ack_message(1, 100, hello_ack);
+    std::span<const std::byte> ack_payload(hello_ack_pkt.data() + input_wire_header_size, hello_ack_pkt.size() - input_wire_header_size);
+    auto dec_ack = decode_hello_ack_message(ack_payload, err);
+    require(dec_ack.has_value(), "HelloAck decode should succeed.");
+    require(dec_ack->max_contacts == 10, "Max contacts match.");
+    require(dec_ack->session_id == "sess-1", "Session ID match.");
+
+    // 3. Key and Cancel round-trips
+    KeyEventPayload key_p{66 /*KEYCODE_ENTER*/, true};
+    auto key_pkt = encode_key_event_message(2, 101, key_p);
+    std::span<const std::byte> key_span(key_pkt.data() + input_wire_header_size, key_pkt.size() - input_wire_header_size);
+    auto dec_key = decode_key_event_message(key_span, err);
+    require(dec_key.has_value() && dec_key->android_keycode == 66 && dec_key->is_down, "Key event round-trip.");
+
+    CancelAllPayload cancel_p{2 /*LostFocus*/};
+    auto cancel_pkt = encode_cancel_all_message(3, 102, cancel_p);
+    std::span<const std::byte> cancel_span(cancel_pkt.data() + input_wire_header_size, cancel_pkt.size() - input_wire_header_size);
+    auto dec_cancel = decode_cancel_all_message(cancel_span, err);
+    require(dec_cancel.has_value() && dec_cancel->reason_code == 2, "CancelAll round-trip.");
+}
+
+void test_ipc_protocol_malformed_truncated_oversized_messages() {
+    // Truncated header
+    std::vector<std::byte> short_hdr(20, std::byte{0});
+    WireHeader wh;
+    require(decode_wire_header(short_hdr, wh) == InputProtocolError::TruncatedHeader,
+        "Short buffer must return TruncatedHeader.");
+
+    // Oversized payload in header
+    wh.magic = input_protocol_magic;
+    wh.version = input_protocol_version;
+    wh.type = InputMessageType::TouchFrame;
+    wh.payload_size = static_cast<uint32_t>(input_maximum_payload_size + 1);
+    auto oversized_bytes = encode_wire_header(wh);
+    require(decode_wire_header(oversized_bytes, wh) == InputProtocolError::OversizedPayload,
+        "Header with payload > 4096 must return OversizedPayload.");
+
+    // Truncated payload for Hello
+    std::vector<std::byte> truncated_payload(4, std::byte{0});
+    InputProtocolError err = InputProtocolError::None;
+    auto res_hello = decode_hello_message(truncated_payload, err);
+    require(!res_hello.has_value() && err == InputProtocolError::TruncatedPayload,
+        "Truncated hello payload must return TruncatedPayload.");
+
+    // Malformed string length in Hello
+    std::vector<std::byte> malformed_hello;
+    uint16_t v = input_protocol_version;
+    uint32_t w = 1080, h = 1920;
+    const auto* p_v = reinterpret_cast<const std::byte*>(&v);
+    malformed_hello.insert(malformed_hello.end(), p_v, p_v + 2);
+    const auto* p_w = reinterpret_cast<const std::byte*>(&w);
+    malformed_hello.insert(malformed_hello.end(), p_w, p_w + 4);
+    const auto* p_h = reinterpret_cast<const std::byte*>(&h);
+    malformed_hello.insert(malformed_hello.end(), p_h, p_h + 4);
+    uint32_t huge_str_len = 999999;
+    const auto* p_len = reinterpret_cast<const std::byte*>(&huge_str_len);
+    malformed_hello.insert(malformed_hello.end(), p_len, p_len + 4);
+    auto res_malformed = decode_hello_message(malformed_hello, err);
+    require(!res_malformed.has_value() && err == InputProtocolError::MalformedPayload,
+        "Malformed string length must return MalformedPayload.");
+
+    // Truncated TouchFrame payload
+    std::vector<std::byte> touch_payload;
+    uint32_t claimed_contacts = 5;
+    const auto* p_c = reinterpret_cast<const std::byte*>(&claimed_contacts);
+    touch_payload.insert(touch_payload.end(), p_c, p_c + 4);
+    // Provide only 1 contact instead of 5
+    WireTouchContact wc{};
+    const auto* p_wc = reinterpret_cast<const std::byte*>(&wc);
+    touch_payload.insert(touch_payload.end(), p_wc, p_wc + sizeof(WireTouchContact));
+    auto res_touch = decode_touch_frame_message(touch_payload, err);
+    require(!res_touch.has_value() && err == InputProtocolError::MalformedPayload,
+        "Touch frame with mismatched contact bytes must return MalformedPayload.");
+}
+
+void test_ipc_protocol_invalid_contact_transitions_and_coordinates() {
+    InputProtocolError err = InputProtocolError::None;
+
+    // Contact ID exceeding maximum limit (10)
+    TouchFramePayload tf;
+    WireTouchContact c1{};
+    c1.contact_id = 15; // invalid! max is 9 (limit 10)
+    c1.transition = 0; // Down
+    c1.norm_u = 0.5f;
+    c1.norm_v = 0.5f;
+    c1.guest_x = 540;
+    c1.guest_y = 960;
+    tf.contacts.push_back(c1);
+
+    auto pkt = encode_touch_frame_message(1, 100, tf);
+    std::span<const std::byte> span(pkt.data() + input_wire_header_size, pkt.size() - input_wire_header_size);
+    auto res = decode_touch_frame_message(span, err);
+    require(!res.has_value() && err == InputProtocolError::InvalidContactId,
+        "Contact ID >= 10 must return InvalidContactId.");
+
+    // Invalid transition (> 3)
+    c1.contact_id = 0;
+    c1.transition = 9; // invalid
+    tf.contacts[0] = c1;
+    pkt = encode_touch_frame_message(2, 101, tf);
+    span = std::span<const std::byte>(pkt.data() + input_wire_header_size, pkt.size() - input_wire_header_size);
+    res = decode_touch_frame_message(span, err);
+    require(!res.has_value() && err == InputProtocolError::InvalidTransition,
+        "Transition > 3 must return InvalidTransition.");
+
+    // Out-of-bounds coordinates (norm_u = 2.5f)
+    c1.transition = 1; // Move
+    c1.norm_u = 2.5f; // invalid out of bounds
+    tf.contacts[0] = c1;
+    pkt = encode_touch_frame_message(3, 102, tf);
+    span = std::span<const std::byte>(pkt.data() + input_wire_header_size, pkt.size() - input_wire_header_size);
+    res = decode_touch_frame_message(span, err);
+    require(!res.has_value() && err == InputProtocolError::InvalidCoordinates,
+        "norm_u > 1.01 must return InvalidCoordinates.");
+
+    // NaN coordinates
+    c1.norm_u = std::numeric_limits<float>::quiet_NaN();
+    tf.contacts[0] = c1;
+    pkt = encode_touch_frame_message(4, 103, tf);
+    span = std::span<const std::byte>(pkt.data() + input_wire_header_size, pkt.size() - input_wire_header_size);
+    res = decode_touch_frame_message(span, err);
+    require(!res.has_value() && err == InputProtocolError::InvalidCoordinates,
+        "NaN coordinates must return InvalidCoordinates.");
+
+    // Valid contact passes
+    c1.norm_u = 0.5f;
+    c1.norm_v = 0.5f;
+    tf.contacts[0] = c1;
+    pkt = encode_touch_frame_message(5, 104, tf);
+    span = std::span<const std::byte>(pkt.data() + input_wire_header_size, pkt.size() - input_wire_header_size);
+    res = decode_touch_frame_message(span, err);
+    require(res.has_value() && err == InputProtocolError::None,
+        "Valid contact coordinates must decode successfully.");
+}
+
+void test_guest_bridge_capability_negotiation() {
+    auto transport = std::make_shared<LoopbackInputTransport>();
+    FakeGuestInputEndpoint endpoint(transport, "session-1", "gen-1", 1080, 1920);
+
+    GuestInputBridgeClient::Config cfg;
+    cfg.session_id = "session-1";
+    cfg.generation_id = "gen-1";
+    cfg.display_width = 1080;
+    cfg.display_height = 1920;
+    auto bridge = std::make_shared<GuestInputBridgeClient>(transport, cfg);
+
+    require(bridge->capability() == MultiTouchBackendCapability::NotConfigured,
+        "Initial capability must be NotConfigured.");
+    require(!bridge->is_connected(), "Initial state must be not connected.");
+
+    // Start bridge -> sends Hello
+    require(bridge->start(), "start() should succeed and send Hello.");
+    require(bridge->connection_state() == GuestInputBridgeClient::ConnectionState::Negotiating,
+        "Bridge must transition to Negotiating.");
+
+    // Guest endpoint processes Hello -> sends HelloAck with max_contacts = 10
+    auto processed = endpoint.poll_and_process();
+    require(processed > 0, "Guest endpoint must process Hello.");
+
+    // Bridge polls acks -> receives HelloAck, transitions to Connected
+    bridge->poll_incoming_acks();
+    require(bridge->is_connected(), "Bridge must be connected after HelloAck.");
+    require(bridge->capability() == MultiTouchBackendCapability::Supported,
+        "Capability must be Supported for max_contacts >= 2.");
+    require(bridge->negotiated_max_contacts() == 10, "Negotiated contacts should be 10.");
+
+    // Scenario 2: Guest only supports 1 contact -> capability must be Unsupported
+    bridge->stop();
+    require(!bridge->is_connected(), "Bridge should be disconnected after stop().");
+    endpoint.reset();
+    endpoint.set_simulated_max_contacts(1);
+
+    require(bridge->start(), "start() should initiate negotiation.");
+    endpoint.poll_and_process();
+    bridge->poll_incoming_acks();
+    require(bridge->is_connected(), "Bridge connected.");
+    require(bridge->capability() == MultiTouchBackendCapability::Unsupported,
+        "Capability must be Unsupported if guest max contacts is 1.");
+}
+
+void test_guest_bridge_multi_touch_stream_and_acks() {
+    auto transport = std::make_shared<LoopbackInputTransport>();
+    FakeGuestInputEndpoint endpoint(transport, "session-test", "gen-A", 1080, 1920);
+
+    GuestInputBridgeClient::Config cfg;
+    cfg.session_id = "session-test";
+    cfg.generation_id = "gen-A";
+    auto bridge = std::make_shared<GuestInputBridgeClient>(transport, cfg);
+
+    bridge->start();
+    endpoint.poll_and_process();
+    bridge->poll_incoming_acks();
+    require(bridge->is_connected(), "Bridge connected.");
+
+    // Send touch frame with 2 contacts: contact 0 and contact 1 Down
+    TouchContactState c0;
+    c0.contact_id = 0;
+    c0.is_active = true;
+    c0.start_time_ms = 1000;
+    c0.last_move_time_ms = 1000;
+    c0.norm_pos = {0.2f, 0.3f};
+    c0.guest_x = 216;
+    c0.guest_y = 576;
+
+    TouchContactState c1;
+    c1.contact_id = 1;
+    c1.is_active = true;
+    c1.start_time_ms = 1000;
+    c1.last_move_time_ms = 1000;
+    c1.norm_pos = {0.7f, 0.8f};
+    c1.guest_x = 756;
+    c1.guest_y = 1536;
+
+    bool sent = bridge->send_touch_frame({c0, c1});
+    require(sent, "send_touch_frame should return true when transport accepts.");
+    require(bridge->total_sent_count() == 1, "Sent count should be 1.");
+    require(bridge->total_acked_count() == 0, "Acked count should be 0 before guest processes.");
+
+    // Guest endpoint processes frame
+    std::size_t processed = endpoint.poll_and_process();
+    require(processed == 1, "Guest should process 1 frame.");
+    require(endpoint.active_contact_count() == 2, "Guest should track 2 active contacts.");
+    require(endpoint.is_contact_active(0) && endpoint.is_contact_active(1), "Both contacts active.");
+
+    // Bridge polls acks
+    bridge->poll_incoming_acks();
+    require(bridge->total_acked_count() == 1, "Acked count should be 1.");
+    require(bridge->last_acked_sequence() > 0, "Acked sequence should match.");
+
+    // Send frame: c0 Move, c1 Up
+    c0.last_move_time_ms = 1016;
+    c0.norm_pos = {0.25f, 0.35f};
+    c1.is_active = false; // Up
+
+    sent = bridge->send_touch_frame({c0, c1});
+    require(sent, "Move/Up frame sent.");
+    endpoint.poll_and_process();
+    bridge->poll_incoming_acks();
+
+    require(endpoint.active_contact_count() == 1, "After Up, only 1 contact active.");
+    require(endpoint.is_contact_active(0), "Contact 0 active.");
+    require(!endpoint.is_contact_active(1), "Contact 1 inactive.");
+    require(bridge->total_acked_count() == 2, "Acked count should be 2.");
+
+    // Key event test
+    bool key_sent = bridge->send_key_event(66 /*KEYCODE_ENTER*/, true);
+    require(key_sent, "Key event should be sent.");
+    endpoint.poll_and_process();
+    bridge->poll_incoming_acks();
+    require(endpoint.total_keys_received() == 1, "Guest received 1 key event.");
+    require(bridge->total_acked_count() == 3, "Total acks should be 3.");
+}
+
+void test_guest_bridge_stale_generation_and_session_switching() {
+    auto transport = std::make_shared<LoopbackInputTransport>();
+    // Guest expects gen-2, but client is configured with gen-1
+    FakeGuestInputEndpoint endpoint(transport, "sess-1", "gen-2", 1080, 1920);
+
+    GuestInputBridgeClient::Config cfg;
+    cfg.session_id = "sess-1";
+    cfg.generation_id = "gen-1";
+    auto bridge = std::make_shared<GuestInputBridgeClient>(transport, cfg);
+
+    bridge->start();
+    endpoint.poll_and_process();
+    bridge->poll_incoming_acks();
+
+    require(!bridge->is_connected(), "Bridge must reject connection with mismatched generation.");
+    require(bridge->connection_state() == GuestInputBridgeClient::ConnectionState::Error,
+        "Bridge should be in Error state.");
+    require(bridge->last_error() == InputProtocolError::StaleGeneration,
+        "Error must be StaleGeneration.");
+    require(bridge->capability() == MultiTouchBackendCapability::Unsupported,
+        "Capability must be Unsupported.");
+
+    // Reset generation to match guest
+    bridge->reset_generation("gen-2");
+    require(bridge->connection_state() == GuestInputBridgeClient::ConnectionState::Disconnected,
+        "Resetting generation should transition to Disconnected.");
+
+    require(bridge->start(), "start() with correct generation.");
+    endpoint.poll_and_process();
+    bridge->poll_incoming_acks();
+    require(bridge->is_connected(), "Bridge should connect after generation fix.");
+}
+
+void test_guest_bridge_disconnect_and_active_contact_cancellation() {
+    auto transport = std::make_shared<LoopbackInputTransport>();
+    FakeGuestInputEndpoint endpoint(transport, "sess-A", "gen-A", 1080, 1920);
+
+    GuestInputBridgeClient::Config cfg;
+    cfg.session_id = "sess-A";
+    cfg.generation_id = "gen-A";
+    auto bridge = std::make_shared<GuestInputBridgeClient>(transport, cfg);
+
+    bridge->start();
+    endpoint.poll_and_process();
+    bridge->poll_incoming_acks();
+    require(bridge->is_connected(), "Connected.");
+
+    // Add active contact
+    TouchContactState c0;
+    c0.contact_id = 0;
+    c0.is_active = true;
+    c0.start_time_ms = 500;
+    c0.last_move_time_ms = 500;
+    c0.norm_pos = {0.5f, 0.5f};
+    bridge->send_touch_frame({c0});
+    endpoint.poll_and_process();
+    bridge->poll_incoming_acks();
+    require(endpoint.active_contact_count() == 1, "1 active contact.");
+
+    // Call cancel_all_contacts
+    require(bridge->cancel_all_contacts(1), "cancel_all_contacts should succeed.");
+    endpoint.poll_and_process();
+    bridge->poll_incoming_acks();
+    require(endpoint.active_contact_count() == 0, "Contacts should be cleared after CancelAll.");
+    require(endpoint.total_cancels_received() == 1, "Total cancels received should be 1.");
+
+    // Sever connection
+    transport->set_fault_sever_connection();
+    require(!bridge->send_touch_frame({c0}), "Send on severed connection must fail.");
+    require(bridge->total_dropped_count() > 0, "Dropped count must increment.");
+    require(bridge->last_error() == InputProtocolError::ConnectionClosed,
+        "Last error must be ConnectionClosed.");
+}
+
+void test_guest_bridge_transport_failure_and_queue_overflow() {
+    auto transport = std::make_shared<LoopbackInputTransport>(256 /*very small buffer*/);
+    FakeGuestInputEndpoint endpoint(transport, "sess-O", "gen-O", 1080, 1920);
+
+    GuestInputBridgeClient::Config cfg;
+    cfg.session_id = "sess-O";
+    cfg.generation_id = "gen-O";
+    auto bridge = std::make_shared<GuestInputBridgeClient>(transport, cfg);
+
+    bridge->start();
+    endpoint.poll_and_process();
+    bridge->poll_incoming_acks();
+    require(bridge->is_connected(), "Connected.");
+
+    // Drop sends fault injection
+    transport->set_fault_drop_sends(true);
+    TouchContactState c0;
+    c0.contact_id = 0;
+    c0.is_active = true;
+    c0.start_time_ms = 100;
+    c0.last_move_time_ms = 100;
+    c0.norm_pos = {0.1f, 0.1f};
+    require(!bridge->send_touch_frame({c0}), "Send must fail when drop fault is enabled.");
+    require(bridge->last_error() == InputProtocolError::QueueOverflow,
+        "Error should be QueueOverflow.");
+    require(bridge->total_dropped_count() == 1, "Dropped count should increment.");
+
+    transport->set_fault_drop_sends(false);
+    // Exceed negotiated contact count (e.g. 15 contacts when max is 10)
+    std::vector<TouchContactState> many_contacts;
+    for (uint32_t i = 0; i < 15; ++i) {
+        TouchContactState c;
+        c.contact_id = i;
+        c.is_active = true;
+        c.norm_pos = {0.1f, 0.1f};
+        many_contacts.push_back(c);
+    }
+    require(!bridge->send_touch_frame(many_contacts), "Sending > max_contacts must fail.");
+    require(bridge->last_error() == InputProtocolError::ExceededContactLimit,
+        "Error must be ExceededContactLimit.");
+}
+
+void test_guest_bridge_mapping_engine_integration() {
+    auto transport = std::make_shared<LoopbackInputTransport>();
+    FakeGuestInputEndpoint endpoint(transport, "sess-eng", "gen-eng", 1080, 1920);
+
+    GuestInputBridgeClient::Config cfg;
+    cfg.session_id = "sess-eng";
+    cfg.generation_id = "gen-eng";
+    auto bridge = std::make_shared<GuestInputBridgeClient>(transport, cfg);
+
+    InputMappingEngine engine;
+    engine.set_guest_bridge(bridge);
+
+    // Initial state: not started -> NotConfigured
+    require(engine.multi_touch_capability() == MultiTouchBackendCapability::NotConfigured,
+        "Engine capability should be NotConfigured before bridge start.");
+
+    // Start bridge & negotiate
+    bridge->start();
+    endpoint.poll_and_process();
+    bridge->poll_incoming_acks();
+
+    // Now bridge is connected -> capability is Supported!
+    require(bridge->is_connected(), "Bridge connected.");
+    require(engine.multi_touch_capability() == MultiTouchBackendCapability::Supported,
+        "Engine capability should dynamically reflect Supported.");
+
+    // Stop bridge -> capability reflects NotConfigured
+    bridge->stop();
+    require(engine.multi_touch_capability() == MultiTouchBackendCapability::NotConfigured,
+        "Engine capability returns to NotConfigured when bridge stops.");
+}
+
+void test_guest_bridge_shutdown_with_pending_work() {
+    auto transport = std::make_shared<LoopbackInputTransport>();
+    FakeGuestInputEndpoint endpoint(transport, "sess-S", "gen-S", 1080, 1920);
+
+    GuestInputBridgeClient::Config cfg;
+    cfg.session_id = "sess-S";
+    cfg.generation_id = "gen-S";
+    auto bridge = std::make_shared<GuestInputBridgeClient>(transport, cfg);
+
+    bridge->start();
+    endpoint.poll_and_process();
+    bridge->poll_incoming_acks();
+
+    // Send multiple touch frames into transport without guest polling
+    for (int i = 0; i < 5; ++i) {
+        TouchContactState c;
+        c.contact_id = 0;
+        c.is_active = true;
+        c.start_time_ms = 1000 + i * 16;
+        c.last_move_time_ms = 1000 + i * 16;
+        c.norm_pos = {0.1f * i, 0.1f * i};
+        bridge->send_touch_frame({c});
+    }
+
+    require(bridge->total_sent_count() == 5, "5 frames sent.");
+    require(bridge->total_acked_count() == 0, "No acks yet.");
+
+    // Abrupt shutdown with pending work
+    bridge->stop();
+    require(!bridge->is_connected(), "Bridge must be disconnected after stop.");
+    require(bridge->connection_state() == GuestInputBridgeClient::ConnectionState::Disconnected,
+        "State must be Disconnected.");
+}
+
 }
 
 int main() {
@@ -1577,7 +2073,17 @@ int main() {
         test_multi_contact_transitions_and_limits();
         test_multi_touch_capability_reporting();
         test_input_queue_overflow_no_stuck_state();
-        std::cout << "All studio player viewport, input forwarding, session integration, input mapping profiles, multi-touch architecture, and D3D11 presentation tests passed successfully.\n";
+        test_ipc_protocol_encoding_decoding_and_versioning();
+        test_ipc_protocol_malformed_truncated_oversized_messages();
+        test_ipc_protocol_invalid_contact_transitions_and_coordinates();
+        test_guest_bridge_capability_negotiation();
+        test_guest_bridge_multi_touch_stream_and_acks();
+        test_guest_bridge_stale_generation_and_session_switching();
+        test_guest_bridge_disconnect_and_active_contact_cancellation();
+        test_guest_bridge_transport_failure_and_queue_overflow();
+        test_guest_bridge_mapping_engine_integration();
+        test_guest_bridge_shutdown_with_pending_work();
+        std::cout << "All studio player viewport, input forwarding, session integration, input mapping profiles, multi-touch architecture, guest input bridge IPC, and D3D11 presentation tests passed successfully.\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "Test failed: " << error.what() << '\n';

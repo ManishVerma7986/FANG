@@ -57,7 +57,9 @@ public:
     uint32_t active_contact_count() const noexcept { return contact_model_.active_contact_count(); }
     const MultiTouchContactModel& contact_model() const noexcept { return contact_model_; }
 
-    // Multi-touch capability
+    // Multi-touch capability & Guest Bridge
+    std::shared_ptr<IGuestInputBridge> guest_bridge() const noexcept { return guest_bridge_; }
+    void set_guest_bridge(std::shared_ptr<IGuestInputBridge> bridge) noexcept;
     MultiTouchBackendCapability multi_touch_capability() const noexcept;
     void set_multi_touch_capability(MultiTouchBackendCapability cap) noexcept;
 

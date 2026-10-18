@@ -51,7 +51,19 @@ void InputMappingEngine::set_viewport_focused(bool focused) noexcept {
     }
 }
 
+void InputMappingEngine::set_guest_bridge(std::shared_ptr<IGuestInputBridge> bridge) noexcept {
+    if (bridge) {
+        guest_bridge_ = std::move(bridge);
+    } else {
+        guest_bridge_ = std::make_shared<UnconfiguredAdbGuestInputBridge>();
+    }
+    contact_model_.set_backend_capability(guest_bridge_->capability());
+}
+
 MultiTouchBackendCapability InputMappingEngine::multi_touch_capability() const noexcept {
+    if (guest_bridge_) {
+        return guest_bridge_->capability();
+    }
     return contact_model_.backend_capability();
 }
 
