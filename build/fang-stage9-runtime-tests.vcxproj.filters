@@ -1,0 +1,64 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="A:\PYTHON PROJECT\Fang root folder\Fang\tests\unit\stage9_runtime_tests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\player_viewport.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\studio_input_router.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\adb_input_dispatcher.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\video_transport.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\viewport_renderer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\studio_session.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\touch_contact_model.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\input_profile.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\input_mapping_engine.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\input_ipc_protocol.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\input_transport.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\socket_input_transport.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\fake_guest_input_endpoint.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\guest_input_bridge.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\guest_endpoint_forwarder.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\guest_deployment_coordinator.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="A:\PYTHON PROJECT\Fang root folder\Fang\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{34EC15DA-0112-3D3F-A13A-443C1B7FCC0C}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

@@ -43,7 +43,7 @@ public:
     GuestInputDaemon(
         std::shared_ptr<IInputTransport> transport,
         std::shared_ptr<IGuestInputBackend> backend,
-        Config config = {});
+        Config config);
     ~GuestInputDaemon();
 
     // Lifecycle

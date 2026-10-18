@@ -1,0 +1,6 @@
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-input-daemon\guest_input_backend.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang_guest_daemon_core.dir\Release\guest_input_backend.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-input-daemon\guest_input_daemon.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang_guest_daemon_core.dir\Release\guest_input_daemon.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-input-daemon\guest_manifest.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang_guest_daemon_core.dir\Release\guest_manifest.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\input_ipc_protocol.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang_guest_daemon_core.dir\Release\input_ipc_protocol.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\input_transport.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang_guest_daemon_core.dir\Release\input_transport.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\socket_input_transport.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang_guest_daemon_core.dir\Release\socket_input_transport.obj

@@ -1,0 +1,236 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Solution>
+	<Configurations>
+		<BuildType Name="Debug"/>
+		<BuildType Name="Release"/>
+		<BuildType Name="MinSizeRel"/>
+		<BuildType Name="RelWithDebInfo"/>
+		<Platform Name="x64"/>
+	</Configurations>
+	<Project Path="ALL_BUILD.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="faf676c9-edd5-3e01-be8b-f8f5236aa62e" DefaultStartup="true">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang-core-tests.vcxproj"/>
+		<BuildDependency Project="fang-guest-daemon-tests.vcxproj"/>
+		<BuildDependency Project="fang-host-timing.vcxproj"/>
+		<BuildDependency Project="fang-host-timing-tests.vcxproj"/>
+		<BuildDependency Project="fang-input-daemon.vcxproj"/>
+		<BuildDependency Project="fang-reference-runtime-smoke.vcxproj"/>
+		<BuildDependency Project="fang-runtime-broker.vcxproj"/>
+		<BuildDependency Project="fang-runtime-broker-native-tests.vcxproj"/>
+		<BuildDependency Project="fang-runtime-broker-tests.vcxproj"/>
+		<BuildDependency Project="fang-runtime-supervisor.vcxproj"/>
+		<BuildDependency Project="fang-runtime-supervisor-native-tests.vcxproj"/>
+		<BuildDependency Project="fang-runtime-tests.vcxproj"/>
+		<BuildDependency Project="fang-socket-transport-tests.vcxproj"/>
+		<BuildDependency Project="fang-stage9-runtime-tests.vcxproj"/>
+		<BuildDependency Project="fang-studio.vcxproj"/>
+		<BuildDependency Project="fang-studio-player-tests.vcxproj"/>
+		<BuildDependency Project="fang-studio-smoke-tests.vcxproj"/>
+		<BuildDependency Project="fang-studio-video-tests.vcxproj"/>
+		<BuildDependency Project="fang-studio-window-selection-tests.vcxproj"/>
+		<BuildDependency Project="fang-video-smoke.vcxproj"/>
+		<BuildDependency Project="fang-video-smoke-tests.vcxproj"/>
+		<BuildDependency Project="fang_core.vcxproj"/>
+		<BuildDependency Project="fang_guest_daemon_core.vcxproj"/>
+		<BuildDependency Project="fang_host_timing_core.vcxproj"/>
+		<BuildDependency Project="fang_runtime.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_core.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_native.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_native_test.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_transport.vcxproj"/>
+		<BuildDependency Project="fang_runtime_supervisor_client.vcxproj"/>
+		<Build Solution="Debug|*" Project="false"/>
+		<Build Solution="Release|*" Project="false"/>
+		<Build Solution="MinSizeRel|*" Project="false"/>
+		<Build Solution="RelWithDebInfo|*" Project="false"/>
+	</Project>
+	<Project Path="Continuous.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="092929f6-2d6e-3ac3-ab2d-de5fef35a0a5">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<Build Solution="Debug|*" Project="false"/>
+		<Build Solution="Release|*" Project="false"/>
+		<Build Solution="MinSizeRel|*" Project="false"/>
+		<Build Solution="RelWithDebInfo|*" Project="false"/>
+	</Project>
+	<Project Path="Experimental.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="624e0528-c6b1-3593-979f-6ddc162abb24">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<Build Solution="Debug|*" Project="false"/>
+		<Build Solution="Release|*" Project="false"/>
+		<Build Solution="MinSizeRel|*" Project="false"/>
+		<Build Solution="RelWithDebInfo|*" Project="false"/>
+	</Project>
+	<Project Path="Nightly.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="432b1e33-af72-37b4-a157-9381c799af30">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<Build Solution="Debug|*" Project="false"/>
+		<Build Solution="Release|*" Project="false"/>
+		<Build Solution="MinSizeRel|*" Project="false"/>
+		<Build Solution="RelWithDebInfo|*" Project="false"/>
+	</Project>
+	<Project Path="NightlyMemoryCheck.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="a0342a14-ab44-3103-bf9b-870bff2d2d94">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<Build Solution="Debug|*" Project="false"/>
+		<Build Solution="Release|*" Project="false"/>
+		<Build Solution="MinSizeRel|*" Project="false"/>
+		<Build Solution="RelWithDebInfo|*" Project="false"/>
+	</Project>
+	<Project Path="RUN_TESTS.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="ea7e2ebc-3797-3b15-944f-670568e0da43">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<Build Solution="Debug|*" Project="false"/>
+		<Build Solution="Release|*" Project="false"/>
+		<Build Solution="MinSizeRel|*" Project="false"/>
+		<Build Solution="RelWithDebInfo|*" Project="false"/>
+	</Project>
+	<Project Path="ZERO_CHECK.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="aa308ee5-9ee9-3a7f-a8fc-df398e67e0e3"/>
+	<Project Path="fang-core-tests.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="52801015-8ca7-3757-9951-f7de55777847">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_core.vcxproj"/>
+	</Project>
+	<Project Path="fang-guest-daemon-tests.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="f12afa28-065d-3baa-a227-c007781e0f8f">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_guest_daemon_core.vcxproj"/>
+	</Project>
+	<Project Path="fang-host-timing.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="31f8a6c0-5938-33fa-8970-7f07c3d5c662">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_host_timing_core.vcxproj"/>
+	</Project>
+	<Project Path="fang-host-timing-tests.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="fbff381d-d545-3ef8-b3f6-1d41aaccb253">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_host_timing_core.vcxproj"/>
+	</Project>
+	<Project Path="fang-input-daemon.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="eff9f425-889b-3707-9681-b75ee8ebcc2b">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_guest_daemon_core.vcxproj"/>
+	</Project>
+	<Project Path="fang-reference-runtime-smoke.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="45a4796a-e568-345c-83a5-a64b37e00e8d">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_core.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_native.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_transport.vcxproj"/>
+		<BuildDependency Project="fang_runtime_supervisor_client.vcxproj"/>
+	</Project>
+	<Project Path="fang-runtime-broker.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="46711a2c-0acc-3c6c-8ceb-6e0e9808ca59">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_core.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_transport.vcxproj"/>
+	</Project>
+	<Project Path="fang-runtime-broker-native-tests.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="d8f8c8a7-0dbd-36c6-88ff-ebb42f0533c9">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_core.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_native.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_transport.vcxproj"/>
+	</Project>
+	<Project Path="fang-runtime-broker-tests.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="0faa2d4b-e802-31de-b259-00293604d963">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_core.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_transport.vcxproj"/>
+	</Project>
+	<Project Path="fang-runtime-supervisor.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="104ab6a4-4940-3211-b8d6-29f8adabd854">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_core.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_native.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_transport.vcxproj"/>
+	</Project>
+	<Project Path="fang-runtime-supervisor-native-tests.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="ef83a8b5-ae23-30f3-9c88-07d96f20cb03">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_core.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_native_test.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_transport.vcxproj"/>
+		<BuildDependency Project="fang_runtime_supervisor_client.vcxproj"/>
+	</Project>
+	<Project Path="fang-runtime-tests.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="c19fa7b4-3af7-30db-97d7-5dea893b9261">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_runtime.vcxproj"/>
+	</Project>
+	<Project Path="fang-socket-transport-tests.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="e494bd83-bf4b-30f7-8472-2fcd6a1cccab">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_guest_daemon_core.vcxproj"/>
+	</Project>
+	<Project Path="fang-stage9-runtime-tests.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="3a971671-ea90-37e6-a1fd-f52faa79e704">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_core.vcxproj"/>
+		<BuildDependency Project="fang_guest_daemon_core.vcxproj"/>
+		<BuildDependency Project="fang_runtime.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_core.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_transport.vcxproj"/>
+		<BuildDependency Project="fang_runtime_supervisor_client.vcxproj"/>
+	</Project>
+	<Project Path="fang-studio.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="ebc20e12-e564-302c-ba2f-4cbf6cb15c93">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_core.vcxproj"/>
+		<BuildDependency Project="fang_guest_daemon_core.vcxproj"/>
+		<BuildDependency Project="fang_runtime.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_core.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_transport.vcxproj"/>
+		<BuildDependency Project="fang_runtime_supervisor_client.vcxproj"/>
+	</Project>
+	<Project Path="fang-studio-player-tests.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="a809b78c-7f17-36a1-9b07-0295e5e6ed2f">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_core.vcxproj"/>
+		<BuildDependency Project="fang_guest_daemon_core.vcxproj"/>
+		<BuildDependency Project="fang_runtime.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_core.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_transport.vcxproj"/>
+		<BuildDependency Project="fang_runtime_supervisor_client.vcxproj"/>
+	</Project>
+	<Project Path="fang-studio-smoke-tests.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="f2bf2bd9-4486-3f81-97d0-2e904c474b31">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang-studio.vcxproj"/>
+	</Project>
+	<Project Path="fang-studio-video-tests.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="162306af-bfae-36a9-8af0-6404501dac2e">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_core.vcxproj"/>
+		<BuildDependency Project="fang_guest_daemon_core.vcxproj"/>
+		<BuildDependency Project="fang_runtime.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_core.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_transport.vcxproj"/>
+		<BuildDependency Project="fang_runtime_supervisor_client.vcxproj"/>
+	</Project>
+	<Project Path="fang-studio-window-selection-tests.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="690cb13d-7c98-3227-afc4-d344aafc29e7">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+	</Project>
+	<Project Path="fang-video-smoke.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="bbcc21ae-c0fa-3620-84bf-3ba801caed85">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_core.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_native.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_transport.vcxproj"/>
+		<BuildDependency Project="fang_runtime_supervisor_client.vcxproj"/>
+	</Project>
+	<Project Path="fang-video-smoke-tests.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="f88829c9-6c6d-30e1-b4a1-e7d43cb347ea">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_core.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_native.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_transport.vcxproj"/>
+		<BuildDependency Project="fang_runtime_supervisor_client.vcxproj"/>
+	</Project>
+	<Project Path="fang_core.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="99dfd933-912a-308c-a8e1-7e170c86c402">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+	</Project>
+	<Project Path="fang_guest_daemon_core.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="c2a63f74-111a-307b-a57c-63533f220ff9">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+	</Project>
+	<Project Path="fang_host_timing_core.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="4484e725-ee01-32e0-9ef3-91021734c401">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+	</Project>
+	<Project Path="fang_runtime.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="c95d66e6-c8ce-3fa3-9717-97859c8acd5b">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+	</Project>
+	<Project Path="fang_runtime_broker_core.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="781b2f76-ea5e-3863-a451-867206169964">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+	</Project>
+	<Project Path="fang_runtime_broker_native.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="122adad8-6ae1-32fe-8362-e678c9154e4b">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_core.vcxproj"/>
+	</Project>
+	<Project Path="fang_runtime_broker_native_test.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="a2f9f820-901d-3d07-b008-806862784999">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_core.vcxproj"/>
+	</Project>
+	<Project Path="fang_runtime_broker_transport.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="4bf11469-93c8-34ea-b8fd-a5cc27668cc8">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_core.vcxproj"/>
+	</Project>
+	<Project Path="fang_runtime_supervisor_client.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="c9a9996a-32a8-32fe-9237-6b3da8aa8c7e">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_core.vcxproj"/>
+		<BuildDependency Project="fang_runtime_broker_transport.vcxproj"/>
+	</Project>
+</Solution>

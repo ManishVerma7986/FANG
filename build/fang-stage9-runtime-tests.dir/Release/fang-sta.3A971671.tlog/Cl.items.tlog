@@ -1,0 +1,17 @@
+A:\PYTHON PROJECT\Fang root folder\Fang\tests\unit\stage9_runtime_tests.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang-stage9-runtime-tests.dir\Release\stage9_runtime_tests.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\player_viewport.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang-stage9-runtime-tests.dir\Release\player_viewport.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\studio_input_router.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang-stage9-runtime-tests.dir\Release\studio_input_router.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\adb_input_dispatcher.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang-stage9-runtime-tests.dir\Release\adb_input_dispatcher.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\video_transport.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang-stage9-runtime-tests.dir\Release\video_transport.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\viewport_renderer.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang-stage9-runtime-tests.dir\Release\viewport_renderer.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\studio_session.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang-stage9-runtime-tests.dir\Release\studio_session.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\touch_contact_model.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang-stage9-runtime-tests.dir\Release\touch_contact_model.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\input_profile.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang-stage9-runtime-tests.dir\Release\input_profile.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\input_mapping_engine.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang-stage9-runtime-tests.dir\Release\input_mapping_engine.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\input_ipc_protocol.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang-stage9-runtime-tests.dir\Release\input_ipc_protocol.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\input_transport.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang-stage9-runtime-tests.dir\Release\input_transport.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\socket_input_transport.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang-stage9-runtime-tests.dir\Release\socket_input_transport.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\fake_guest_input_endpoint.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang-stage9-runtime-tests.dir\Release\fake_guest_input_endpoint.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\guest_input_bridge.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang-stage9-runtime-tests.dir\Release\guest_input_bridge.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\guest_endpoint_forwarder.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang-stage9-runtime-tests.dir\Release\guest_endpoint_forwarder.obj
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\guest_deployment_coordinator.cpp;A:\PYTHON PROJECT\Fang root folder\Fang\build\fang-stage9-runtime-tests.dir\Release\guest_deployment_coordinator.obj

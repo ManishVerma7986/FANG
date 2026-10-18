@@ -11,6 +11,10 @@
 #include "viewport_renderer.hpp"
 #include "input_mapping_engine.hpp"
 
+#include "guest_endpoint_forwarder.hpp"
+#include "guest_input_bridge.hpp"
+#include "guest_deployment_coordinator.hpp"
+
 #include <memory>
 #include <mutex>
 #include <string>
@@ -82,10 +86,36 @@ constexpr std::string_view studio_video_state_name(StudioVideoState state) noexc
     }
 }
 
+enum class StudioBridgeState {
+    Unconfigured,
+    ForwardingConfigured,
+    Connecting,
+    Negotiating,
+    Connected,
+    Blocked,
+    Error
+};
+
+constexpr std::string_view studio_bridge_state_name(StudioBridgeState state) noexcept {
+    switch (state) {
+    case StudioBridgeState::Unconfigured:         return "Unconfigured";
+    case StudioBridgeState::ForwardingConfigured: return "ForwardingConfigured";
+    case StudioBridgeState::Connecting:           return "Connecting";
+    case StudioBridgeState::Negotiating:          return "Negotiating";
+    case StudioBridgeState::Connected:            return "Connected";
+    case StudioBridgeState::Blocked:              return "Blocked";
+    case StudioBridgeState::Error:                return "Error";
+    default:                                      return "Unknown";
+    }
+}
+
 struct StudioSessionSnapshot {
     StudioSessionPhase phase{StudioSessionPhase::NotStarted};
     StudioInputBindingState input_state{StudioInputBindingState::Unbound};
     StudioVideoState video_state{StudioVideoState::Disconnected};
+    StudioBridgeState bridge_state{StudioBridgeState::Unconfigured};
+    GuestDeploymentPhase deployment_phase{GuestDeploymentPhase::Unconfigured};
+    MultiTouchBackendCapability bridge_capability{MultiTouchBackendCapability::NotConfigured};
     ViewportBackend active_backend{ViewportBackend::None};
 
     std::string generation_id;
@@ -98,6 +128,12 @@ struct StudioSessionSnapshot {
     std::string diagnostic;
     std::string input_diagnostic;
     std::string video_diagnostic;
+    std::string bridge_diagnostic;
+    std::string deployment_diagnostic;
+
+    uint16_t forwarded_host_port{0};
+    std::string forwarder_mechanism;
+    bool is_forwarding_active{false};
 
     std::size_t input_queue_depth{};
     std::size_t input_dispatched_count{};
@@ -115,6 +151,8 @@ struct StudioSessionSnapshot {
     std::wstring user_status_line() const;
     std::wstring input_status_line() const;
     std::wstring video_status_line() const;
+    std::wstring bridge_status_line() const;
+    std::wstring deployment_status_line() const;
     std::wstring backend_status_line() const;
 };
 
@@ -125,14 +163,29 @@ public:
         std::shared_ptr<AdbInputDispatcher> input_dispatcher,
         std::shared_ptr<StudioVideoConsumer> video_consumer,
         std::shared_ptr<SharedMemoryVideoTransport> video_transport,
-        std::shared_ptr<InputMappingEngine> mapping_engine = nullptr);
+        std::shared_ptr<InputMappingEngine> mapping_engine = nullptr,
+        std::shared_ptr<IGuestEndpointForwarder> endpoint_forwarder = nullptr,
+        std::shared_ptr<GuestInputBridgeClient> guest_bridge = nullptr,
+        std::shared_ptr<IGuestDeploymentCoordinator> deployment_coordinator = nullptr);
     ~StudioSessionController();
 
     StudioSessionController(const StudioSessionController&) = delete;
     StudioSessionController& operator=(const StudioSessionController&) = delete;
 
     std::shared_ptr<InputMappingEngine> mapping_engine() const noexcept { return mapping_engine_; }
-    void set_mapping_engine(std::shared_ptr<InputMappingEngine> engine) noexcept { mapping_engine_ = std::move(engine); }
+    void set_mapping_engine(std::shared_ptr<InputMappingEngine> engine) noexcept;
+
+    std::shared_ptr<IGuestEndpointForwarder> endpoint_forwarder() const noexcept { return endpoint_forwarder_; }
+    void set_endpoint_forwarder(std::shared_ptr<IGuestEndpointForwarder> forwarder) noexcept { endpoint_forwarder_ = std::move(forwarder); }
+
+    std::shared_ptr<GuestInputBridgeClient> guest_bridge() const noexcept { return guest_bridge_; }
+    void set_guest_bridge(std::shared_ptr<GuestInputBridgeClient> bridge) noexcept;
+
+    std::shared_ptr<IGuestDeploymentCoordinator> deployment_coordinator() const noexcept { return deployment_coordinator_; }
+    void set_deployment_coordinator(std::shared_ptr<IGuestDeploymentCoordinator> coordinator) noexcept { deployment_coordinator_ = std::move(coordinator); }
+
+    const GuestDeploymentTarget& deployment_target() const noexcept { return deployment_target_; }
+    void set_deployment_target(GuestDeploymentTarget target) noexcept { deployment_target_ = std::move(target); }
 
     StudioSessionSnapshot update(
         const SupervisorRuntimeSnapshot& supervisor_snapshot,
@@ -152,6 +205,13 @@ private:
     std::shared_ptr<StudioVideoConsumer> video_consumer_;
     std::shared_ptr<SharedMemoryVideoTransport> video_transport_;
     std::shared_ptr<InputMappingEngine> mapping_engine_;
+    std::shared_ptr<IGuestEndpointForwarder> endpoint_forwarder_;
+    std::shared_ptr<GuestInputBridgeClient> guest_bridge_;
+    std::shared_ptr<IGuestDeploymentCoordinator> deployment_coordinator_;
+
+    GuestEndpointMapping endpoint_mapping_;
+    GuestDeploymentTarget deployment_target_;
+    GuestDeploymentReport deployment_report_;
 
     mutable std::mutex mutex_;
     StudioSessionSnapshot snapshot_;

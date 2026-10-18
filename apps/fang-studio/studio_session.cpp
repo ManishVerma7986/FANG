@@ -58,6 +58,20 @@ std::wstring StudioSessionSnapshot::user_status_line() const {
         line += L" [INPUT UNAVAILABLE]";
     }
 
+    if (deployment_phase == GuestDeploymentPhase::BlockedMissingToolchain) {
+        line += L" [DEPLOYMENT BLOCKED: Missing Toolchain]";
+    } else if (deployment_phase == GuestDeploymentPhase::ArtifactMissing) {
+        line += L" [DEPLOYMENT BLOCKED: Artifact Missing]";
+    } else if (deployment_phase == GuestDeploymentPhase::ArtifactArchitectureMismatch) {
+        line += L" [DEPLOYMENT BLOCKED: Architecture Mismatch]";
+    } else if (deployment_phase == GuestDeploymentPhase::ArtifactManifestMismatch) {
+        line += L" [DEPLOYMENT BLOCKED: Manifest Mismatch]";
+    } else if (deployment_phase == GuestDeploymentPhase::ArtifactCorrupt) {
+        line += L" [DEPLOYMENT BLOCKED: Artifact Corrupt]";
+    } else if (deployment_phase == GuestDeploymentPhase::DeploymentBlockedOffline) {
+        line += L" [DEPLOYMENT BLOCKED: Offline Policy]";
+    }
+
     return line;
 }
 
@@ -95,6 +109,52 @@ std::wstring StudioSessionSnapshot::video_status_line() const {
     }
 }
 
+std::wstring StudioSessionSnapshot::bridge_status_line() const {
+    switch (bridge_state) {
+    case StudioBridgeState::Connected:
+        return L"Guest Bridge: Connected (Port " + std::to_wstring(forwarded_host_port) + L", " + to_wide_str(forwarder_mechanism) + L")";
+    case StudioBridgeState::Negotiating:
+        return L"Guest Bridge: Negotiating capabilities...";
+    case StudioBridgeState::Connecting:
+        return L"Guest Bridge: Connecting to endpoint...";
+    case StudioBridgeState::ForwardingConfigured:
+        return L"Guest Bridge: Forwarding configured (Port " + std::to_wstring(forwarded_host_port) + L")";
+    case StudioBridgeState::Blocked:
+        return L"Guest Bridge: Blocked (" + (bridge_diagnostic.empty() ? L"Host-to-guest forwarding blocked" : to_wide_str(bridge_diagnostic)) + L")";
+    case StudioBridgeState::Error:
+        return L"Guest Bridge: Error (" + (bridge_diagnostic.empty() ? L"Transport error" : to_wide_str(bridge_diagnostic)) + L")";
+    case StudioBridgeState::Unconfigured:
+    default:
+        return L"Guest Bridge: Unconfigured";
+    }
+}
+
+std::wstring StudioSessionSnapshot::deployment_status_line() const {
+    switch (deployment_phase) {
+    case GuestDeploymentPhase::Deployed:
+        return L"Guest Deployment: Deployed";
+    case GuestDeploymentPhase::ArtifactReady:
+        return L"Guest Deployment: Artifact Ready (" + to_wide_str(deployment_diagnostic) + L")";
+    case GuestDeploymentPhase::BlockedMissingToolchain:
+        return L"Guest Deployment: Blocked (Missing Toolchain: " + to_wide_str(deployment_diagnostic) + L")";
+    case GuestDeploymentPhase::ArtifactMissing:
+        return L"Guest Deployment: Artifact Missing (" + to_wide_str(deployment_diagnostic) + L")";
+    case GuestDeploymentPhase::ArtifactArchitectureMismatch:
+        return L"Guest Deployment: Architecture Mismatch (" + to_wide_str(deployment_diagnostic) + L")";
+    case GuestDeploymentPhase::ArtifactCorrupt:
+        return L"Guest Deployment: Artifact Corrupt (" + to_wide_str(deployment_diagnostic) + L")";
+    case GuestDeploymentPhase::ArtifactManifestMismatch:
+        return L"Guest Deployment: Manifest Mismatch (" + to_wide_str(deployment_diagnostic) + L")";
+    case GuestDeploymentPhase::DeploymentBlockedOffline:
+        return L"Guest Deployment: Blocked Offline (" + to_wide_str(deployment_diagnostic) + L")";
+    case GuestDeploymentPhase::DeploymentFailed:
+        return L"Guest Deployment: Failed (" + to_wide_str(deployment_diagnostic) + L")";
+    case GuestDeploymentPhase::Unconfigured:
+    default:
+        return L"Guest Deployment: Unconfigured";
+    }
+}
+
 std::wstring StudioSessionSnapshot::backend_status_line() const {
     switch (active_backend) {
     case ViewportBackend::Direct3D11:
@@ -112,15 +172,41 @@ StudioSessionController::StudioSessionController(
     std::shared_ptr<AdbInputDispatcher> input_dispatcher,
     std::shared_ptr<StudioVideoConsumer> video_consumer,
     std::shared_ptr<SharedMemoryVideoTransport> video_transport,
-    std::shared_ptr<InputMappingEngine> mapping_engine)
+    std::shared_ptr<InputMappingEngine> mapping_engine,
+    std::shared_ptr<IGuestEndpointForwarder> endpoint_forwarder,
+    std::shared_ptr<GuestInputBridgeClient> guest_bridge,
+    std::shared_ptr<IGuestDeploymentCoordinator> deployment_coordinator)
     : input_router_(std::move(input_router)),
       input_dispatcher_(std::move(input_dispatcher)),
       video_consumer_(std::move(video_consumer)),
       video_transport_(std::move(video_transport)),
-      mapping_engine_(std::move(mapping_engine)) {}
+      mapping_engine_(std::move(mapping_engine)),
+      endpoint_forwarder_(std::move(endpoint_forwarder)),
+      guest_bridge_(std::move(guest_bridge)),
+      deployment_coordinator_(std::move(deployment_coordinator)) {
+    if (mapping_engine_ && guest_bridge_) {
+        mapping_engine_->set_guest_bridge(guest_bridge_);
+    }
+}
 
 StudioSessionController::~StudioSessionController() {
     notify_shutdown();
+}
+
+void StudioSessionController::set_mapping_engine(std::shared_ptr<InputMappingEngine> engine) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    mapping_engine_ = std::move(engine);
+    if (mapping_engine_ && guest_bridge_) {
+        mapping_engine_->set_guest_bridge(guest_bridge_);
+    }
+}
+
+void StudioSessionController::set_guest_bridge(std::shared_ptr<GuestInputBridgeClient> bridge) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    guest_bridge_ = std::move(bridge);
+    if (mapping_engine_ && guest_bridge_) {
+        mapping_engine_->set_guest_bridge(guest_bridge_);
+    }
 }
 
 void StudioSessionController::notify_shutdown() {
@@ -136,12 +222,21 @@ void StudioSessionController::notify_shutdown() {
     }
     if (mapping_engine_) {
         mapping_engine_->reset_all_state();
-        if (auto bridge = mapping_engine_->guest_bridge()) {
-            if (auto client = std::dynamic_pointer_cast<GuestInputBridgeClient>(bridge)) {
-                client->stop();
-            }
-        }
     }
+    if (guest_bridge_) {
+        guest_bridge_->cancel_all_contacts(0);
+        guest_bridge_->stop();
+    }
+    if (endpoint_forwarder_ && endpoint_mapping_.state == ForwardingState::Active) {
+        endpoint_forwarder_->teardown_forwarding(endpoint_mapping_);
+    }
+    endpoint_mapping_ = GuestEndpointMapping{};
+
+    if (deployment_coordinator_) {
+        deployment_coordinator_->teardown_guest_deployment(current_serial_, deployment_report_);
+    }
+    deployment_report_ = GuestDeploymentReport{};
+
     if (video_transport_) {
         video_transport_->stop();
     }
@@ -151,6 +246,9 @@ void StudioSessionController::notify_shutdown() {
     snapshot_.phase = StudioSessionPhase::Stopped;
     snapshot_.input_state = StudioInputBindingState::Unbound;
     snapshot_.video_state = StudioVideoState::Disconnected;
+    snapshot_.bridge_state = StudioBridgeState::Unconfigured;
+    snapshot_.deployment_phase = GuestDeploymentPhase::Unconfigured;
+    snapshot_.deployment_diagnostic.clear();
 }
 
 void StudioSessionController::reset_session() {
@@ -173,12 +271,20 @@ void StudioSessionController::handle_session_change(const fang::broker::RuntimeS
     }
     if (mapping_engine_) {
         mapping_engine_->reset_all_state();
-        if (auto bridge = mapping_engine_->guest_bridge()) {
-            if (auto client = std::dynamic_pointer_cast<GuestInputBridgeClient>(bridge)) {
-                client->reset_generation(new_runtime.generation_id);
-            }
-        }
     }
+    if (guest_bridge_) {
+        guest_bridge_->cancel_all_contacts(0);
+        guest_bridge_->reset_generation(new_runtime.generation_id);
+    }
+    if (endpoint_forwarder_ && endpoint_mapping_.state == ForwardingState::Active) {
+        endpoint_forwarder_->teardown_forwarding(endpoint_mapping_);
+    }
+    endpoint_mapping_ = GuestEndpointMapping{};
+
+    if (deployment_coordinator_) {
+        deployment_coordinator_->teardown_guest_deployment(current_serial_, deployment_report_);
+    }
+    deployment_report_ = GuestDeploymentReport{};
 
     // Release existing video transport and purge stale frames
     if (video_transport_) {
@@ -354,7 +460,130 @@ StudioSessionSnapshot StudioSessionController::update(
         }
     }
 
-    // 2. Video transport and frame acquisition
+    // 2. Guest Deployment Readiness Evaluation
+    if (deployment_coordinator_) {
+        deployment_report_ = deployment_coordinator_->assess_deployment_readiness(deployment_target_);
+        snap.deployment_phase = deployment_report_.phase;
+        snap.deployment_diagnostic = deployment_report_.diagnostic;
+
+        if (is_ready && !serial.empty() && !is_ambiguous) {
+            if (deployment_report_.phase == GuestDeploymentPhase::ArtifactReady) {
+                deployment_coordinator_->deploy_to_guest(serial, deployment_target_, deployment_report_);
+                snap.deployment_phase = deployment_report_.phase;
+                snap.deployment_diagnostic = deployment_report_.diagnostic;
+            }
+        }
+    }
+
+    // Determine whether unready deployment should block live bridge connections
+    bool deployment_blocks_bridge = false;
+    if (deployment_coordinator_ &&
+        deployment_report_.phase != GuestDeploymentPhase::Deployed &&
+        endpoint_forwarder_ &&
+        endpoint_forwarder_->forwarder_name() != "loopback-test") {
+        deployment_blocks_bridge = true;
+    }
+
+    // 3. Input Bridge & Reachability Forwarding
+    if (is_ready && !serial.empty() && !is_ambiguous) {
+        if (deployment_blocks_bridge) {
+            snap.bridge_state = StudioBridgeState::Blocked;
+            snap.bridge_diagnostic = "Guest input bridge blocked: guest daemon deployment is not ready (" + deployment_report_.diagnostic + ")";
+            if (guest_bridge_ && guest_bridge_->is_connected()) {
+                guest_bridge_->cancel_all_contacts(0);
+                guest_bridge_->stop();
+            }
+            if (endpoint_forwarder_ && endpoint_mapping_.state == ForwardingState::Active) {
+                endpoint_forwarder_->teardown_forwarding(endpoint_mapping_);
+            }
+        } else if (endpoint_forwarder_) {
+            if (!endpoint_forwarder_->is_forwarding_active(endpoint_mapping_) &&
+                endpoint_mapping_.state != ForwardingState::Blocked) {
+                endpoint_forwarder_->setup_forwarding(serial, 24800, endpoint_mapping_);
+            }
+
+            snap.forwarder_mechanism = std::string(forwarding_mechanism_name(endpoint_mapping_.mechanism));
+            snap.forwarded_host_port = endpoint_mapping_.host_port;
+            snap.is_forwarding_active = endpoint_forwarder_->is_forwarding_active(endpoint_mapping_);
+            snap.bridge_diagnostic = endpoint_mapping_.diagnostic;
+
+            if (endpoint_mapping_.state == ForwardingState::Active) {
+                snap.bridge_state = StudioBridgeState::ForwardingConfigured;
+                if (guest_bridge_) {
+                    if (guest_bridge_->connection_state() == GuestInputBridgeClient::ConnectionState::Disconnected) {
+                        snap.bridge_state = StudioBridgeState::Connecting;
+                        guest_bridge_->start();
+                    }
+                    guest_bridge_->poll_incoming_acks();
+                    const auto bstate = guest_bridge_->connection_state();
+                    if (bstate == GuestInputBridgeClient::ConnectionState::Connecting) {
+                        snap.bridge_state = StudioBridgeState::Connecting;
+                    } else if (bstate == GuestInputBridgeClient::ConnectionState::Negotiating) {
+                        snap.bridge_state = StudioBridgeState::Negotiating;
+                    } else if (bstate == GuestInputBridgeClient::ConnectionState::Connected) {
+                        snap.bridge_state = StudioBridgeState::Connected;
+                        snap.bridge_capability = guest_bridge_->capability();
+                        if (mapping_engine_ && mapping_engine_->guest_bridge() != guest_bridge_) {
+                            mapping_engine_->set_guest_bridge(guest_bridge_);
+                        }
+                    } else if (bstate == GuestInputBridgeClient::ConnectionState::Error) {
+                        snap.bridge_state = StudioBridgeState::Error;
+                        snap.bridge_diagnostic = guest_bridge_->status_diagnostic();
+                        if (mapping_engine_) {
+                            mapping_engine_->reset_all_state();
+                        }
+                    }
+                }
+            } else if (endpoint_mapping_.state == ForwardingState::Blocked) {
+                snap.bridge_state = StudioBridgeState::Blocked;
+                if (guest_bridge_ && guest_bridge_->is_connected()) {
+                    guest_bridge_->cancel_all_contacts(0);
+                    guest_bridge_->stop();
+                }
+            } else if (endpoint_mapping_.state == ForwardingState::Failed) {
+                snap.bridge_state = StudioBridgeState::Error;
+                if (guest_bridge_ && guest_bridge_->is_connected()) {
+                    guest_bridge_->cancel_all_contacts(0);
+                    guest_bridge_->stop();
+                }
+            }
+        } else if (guest_bridge_) {
+            if (guest_bridge_->connection_state() == GuestInputBridgeClient::ConnectionState::Disconnected) {
+                snap.bridge_state = StudioBridgeState::Connecting;
+                guest_bridge_->start();
+            }
+            guest_bridge_->poll_incoming_acks();
+            const auto bstate = guest_bridge_->connection_state();
+            if (bstate == GuestInputBridgeClient::ConnectionState::Connecting) {
+                snap.bridge_state = StudioBridgeState::Connecting;
+            } else if (bstate == GuestInputBridgeClient::ConnectionState::Negotiating) {
+                snap.bridge_state = StudioBridgeState::Negotiating;
+            } else if (bstate == GuestInputBridgeClient::ConnectionState::Connected) {
+                snap.bridge_state = StudioBridgeState::Connected;
+                snap.bridge_capability = guest_bridge_->capability();
+                if (mapping_engine_ && mapping_engine_->guest_bridge() != guest_bridge_) {
+                    mapping_engine_->set_guest_bridge(guest_bridge_);
+                }
+            } else if (bstate == GuestInputBridgeClient::ConnectionState::Error) {
+                snap.bridge_state = StudioBridgeState::Error;
+                snap.bridge_diagnostic = guest_bridge_->status_diagnostic();
+                if (mapping_engine_) {
+                    mapping_engine_->reset_all_state();
+                }
+            }
+        }
+    } else {
+        if (guest_bridge_ && guest_bridge_->is_connected()) {
+            guest_bridge_->cancel_all_contacts(0);
+            guest_bridge_->stop();
+        }
+        if (endpoint_forwarder_ && endpoint_mapping_.state == ForwardingState::Active) {
+            endpoint_forwarder_->teardown_forwarding(endpoint_mapping_);
+        }
+        snap.bridge_state = StudioBridgeState::Unconfigured;
+    }
+
+    // 3. Video transport and frame acquisition
     if (is_ready && !serial.empty() && !is_ambiguous) {
         const auto endpoint = shared_memory_name_for_serial(serial);
         if (endpoint.has_value() && video_transport_) {

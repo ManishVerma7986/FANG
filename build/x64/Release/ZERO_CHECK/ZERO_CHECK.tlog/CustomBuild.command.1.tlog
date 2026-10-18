@@ -1,0 +1,10 @@
+^A:\PYTHON PROJECT\FANG ROOT FOLDER\FANG\BUILD\CMAKEFILES\8C5532ADA00ECD72EDB2437DC5ADB267\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" "-SA:/PYTHON PROJECT/Fang root folder/Fang" "-BA:/PYTHON PROJECT/Fang root folder/Fang/build" --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file "A:/PYTHON PROJECT/Fang root folder/Fang/build/Fang.slnx"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

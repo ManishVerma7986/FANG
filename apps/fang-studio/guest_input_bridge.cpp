@@ -220,11 +220,31 @@ void GuestInputBridgeClient::poll_incoming_acks() {
 }
 
 void GuestInputBridgeClient::poll_incoming_acks_locked() {
-    if (!transport_ || !transport_->is_connected()) {
+    if (!transport_) {
+        return;
+    }
+
+    if (!transport_->is_connected()) {
+        if (state_ == ConnectionState::Connected || state_ == ConnectionState::Negotiating) {
+            state_ = ConnectionState::Error;
+            last_error_ = InputProtocolError::ConnectionClosed;
+            diagnostic_override_ = "Transport connection closed.";
+            capability_ = MultiTouchBackendCapability::Unsupported;
+        }
         return;
     }
 
     auto bytes = transport_->receive_bytes(8192);
+    if (!transport_->is_connected()) {
+        if (state_ == ConnectionState::Connected || state_ == ConnectionState::Negotiating) {
+            state_ = ConnectionState::Error;
+            last_error_ = InputProtocolError::ConnectionClosed;
+            diagnostic_override_ = "Transport connection closed by peer.";
+            capability_ = MultiTouchBackendCapability::Unsupported;
+        }
+        return;
+    }
+
     if (!bytes.empty()) {
         receive_buffer_.insert(receive_buffer_.end(), bytes.begin(), bytes.end());
     }
