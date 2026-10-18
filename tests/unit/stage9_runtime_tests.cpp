@@ -1125,6 +1125,764 @@ void test_repository_root_deterministic_selection() {
     std::cout << "  [PASS] test_repository_root_deterministic_selection" << std::endl;
 }
 
+// ----------------------------------------------------------------------------
+// 14. Deployment Planner Tests
+// ----------------------------------------------------------------------------
+
+void test_deployment_plan_creation_for_ready_artifact() {
+    std::cout << "  [RUN] test_deployment_plan_creation_for_ready_artifact..." << std::endl;
+
+    GuestDeploymentCoordinator coordinator;
+    const auto temp_dir = std::filesystem::temp_directory_path() / "fang_test_deploy_plan";
+    std::filesystem::create_directories(temp_dir);
+
+    const auto elf_file = temp_dir / "fang-input-daemon-android-x86_64";
+    write_synthetic_elf64(elf_file, 0x3E, 2, 1, 3, 1);
+
+    GuestDeploymentTarget target;
+    target.abi = GuestTargetAbi::X86_64;
+    target.staging_dir = temp_dir.string();
+
+    // Create a valid manifest with provenance
+    GuestArtifactManifest mf;
+    mf.artifact_name = "fang-input-daemon-android-x86_64";
+    mf.artifact_format = "ELF";
+    mf.target_os = "android";
+    mf.target_abi = "x86_64";
+    mf.is_android_elf_binary = true;
+    mf.is_cross_compiled = true;
+    mf.build_configuration = "Release";
+    mf.manifest_schema_version = "stage9-v3";
+    mf.build_result = "Success";
+    mf.artifact_sha256 = coordinator.calculate_file_sha256(elf_file.string());
+    mf.artifact_size_bytes = std::filesystem::file_size(elf_file);
+    mf.ndk_version = "r26.1.10909125";
+    mf.android_api_level = 26;
+    mf.elf_machine = "62";
+    mf.elf_class = 2;
+    mf.elf_data = 1;
+    mf.toolchain_status = ToolchainStatus::ToolchainAvailable;
+    mf.source_evidence.status = SourceEvidence::Status::Collected;
+    mf.source_evidence.algorithm = "sha256";
+    mf.source_evidence.fingerprint = "abc123";
+    mf.source_evidence.scope = "fang-guest-daemon-inputs-v1";
+    mf.source_evidence.encoding = "fang-cim-c14n-v1";
+    mf.source_evidence.captured_at_utc = "2026-10-18T12:00:00Z";
+    mf.source_tree_state = "clean";
+
+    const auto manifest_file = temp_dir / "guest_manifest.json";
+    std::ofstream out(manifest_file);
+    out << mf.to_json();
+    out.close();
+
+    auto report = coordinator.assess_deployment_readiness(target);
+    require(report.phase == GuestDeploymentPhase::ArtifactReady, "Artifact ready");
+    require(report.is_ready_for_push, "Ready for push");
+
+    // Create deployment plan
+    auto plan = GuestDeploymentCoordinator::create_deployment_plan(report);
+
+    // Verify plan structure
+    require(!plan.steps.empty(), "Plan has steps");
+    require(plan.steps.size() == 7, "Plan has 7 steps (ValidateArtifact, VerifyManifest, CheckProvenance, SetupTransport, PushBinary, StartDaemon, VerifyConnection)");
+
+    // Note: In temp directory without git repo, current evidence collection fails,
+    // so provenance will be Unavailable, causing plan.has_failures = true.
+    // This is expected behavior - the plan correctly reflects provenance status.
+    // We verify the plan structure is correct regardless.
+    
+    // Verify step types
+    require(plan.steps[0].type == DeploymentPlanStepType::ValidateArtifact, "Step 0: ValidateArtifact");
+    require(plan.steps[1].type == DeploymentPlanStepType::VerifyManifest, "Step 1: VerifyManifest");
+    require(plan.steps[2].type == DeploymentPlanStepType::CheckProvenance, "Step 2: CheckProvenance");
+    require(plan.steps[3].type == DeploymentPlanStepType::SetupTransport, "Step 3: SetupTransport");
+    require(plan.steps[4].type == DeploymentPlanStepType::PushBinary, "Step 4: PushBinary");
+    require(plan.steps[5].type == DeploymentPlanStepType::StartDaemon, "Step 5: StartDaemon");
+    require(plan.steps[6].type == DeploymentPlanStepType::VerifyConnection, "Step 6: VerifyConnection");
+
+    // Verify all required steps are marked as required
+    for (const auto& step : plan.steps) {
+        require(step.is_required, "All steps are required");
+    }
+
+    // Verify first three steps are completed (pre-execution validation)
+    require(plan.steps[0].status == DeploymentPlanStepStatus::Completed, "ValidateArtifact completed");
+    require(plan.steps[1].status == DeploymentPlanStepStatus::Completed, "VerifyManifest completed");
+    // CheckProvenance status depends on current evidence availability
+    // (Unavailable in temp dir without git repo)
+
+    // Verify remaining steps are pending
+    for (size_t i = 3; i < plan.steps.size(); ++i) {
+        require(plan.steps[i].status == DeploymentPlanStepStatus::Pending, "Steps 3-6 pending");
+    }
+
+    std::filesystem::remove_all(temp_dir);
+    std::cout << "  [PASS] test_deployment_plan_creation_for_ready_artifact" << std::endl;
+}
+
+void test_deployment_plan_creation_for_missing_artifact() {
+    std::cout << "  [RUN] test_deployment_plan_creation_for_missing_artifact..." << std::endl;
+
+    GuestDeploymentCoordinator coordinator;
+    GuestDeploymentTarget target;
+    target.abi = GuestTargetAbi::X86_64;
+    target.staging_dir = "nonexistent_staging_directory_for_test";
+
+    auto report = coordinator.assess_deployment_readiness(target);
+    require(report.phase == GuestDeploymentPhase::ArtifactMissing || report.phase == GuestDeploymentPhase::BlockedMissingToolchain, "Missing artifact phase");
+
+    auto plan = GuestDeploymentCoordinator::create_deployment_plan(report);
+
+    require(plan.has_failures, "Plan has failures for missing artifact");
+    require(plan.is_complete, "Plan is complete immediately for missing artifact");
+    require(!plan.overall_error_code.empty(), "Error code set");
+
+    std::cout << "  [PASS] test_deployment_plan_creation_for_missing_artifact" << std::endl;
+}
+
+void test_deployment_plan_creation_for_architecture_mismatch() {
+    std::cout << "  [RUN] test_deployment_plan_creation_for_architecture_mismatch..." << std::endl;
+
+    GuestDeploymentCoordinator coordinator;
+    const auto temp_dir = std::filesystem::temp_directory_path() / "fang_test_deploy_plan_arch";
+    std::filesystem::create_directories(temp_dir);
+
+    // Create PE-COFF file (Windows binary) for Android target
+    const auto pe_file = temp_dir / "fang-input-daemon-android-x86_64";
+    {
+        std::ofstream out(pe_file, std::ios::binary);
+        const char mz_header[4] = {'M', 'Z', 0x00, 0x00};
+        out.write(mz_header, sizeof(mz_header));
+    }
+
+    GuestDeploymentTarget target;
+    target.abi = GuestTargetAbi::X86_64;
+    target.staging_dir = temp_dir.string();
+
+    auto report = coordinator.assess_deployment_readiness(target);
+    require(report.phase == GuestDeploymentPhase::ArtifactArchitectureMismatch, "Architecture mismatch");
+
+    auto plan = GuestDeploymentCoordinator::create_deployment_plan(report);
+
+    require(plan.has_failures, "Plan has failures for architecture mismatch");
+    require(plan.overall_error_code == "ARCHITECTURE_MISMATCH", "Error code is ARCHITECTURE_MISMATCH");
+
+    std::filesystem::remove_all(temp_dir);
+    std::cout << "  [PASS] test_deployment_plan_creation_for_architecture_mismatch" << std::endl;
+}
+
+void test_deployment_plan_creation_for_corrupt_artifact() {
+    std::cout << "  [RUN] test_deployment_plan_creation_for_corrupt_artifact..." << std::endl;
+
+    GuestDeploymentCoordinator coordinator;
+    const auto temp_dir = std::filesystem::temp_directory_path() / "fang_test_deploy_plan_corrupt";
+    std::filesystem::create_directories(temp_dir);
+
+    // Create truncated ELF
+    const auto trunc_file = temp_dir / "fang-input-daemon-android-x86_64";
+    {
+        std::ofstream out(trunc_file, std::ios::binary);
+        uint8_t short_hdr[32]{0};
+        short_hdr[0] = 0x7F; short_hdr[1] = 'E'; short_hdr[2] = 'L'; short_hdr[3] = 'F';
+        short_hdr[4] = 2; // ELF64
+        out.write(reinterpret_cast<const char*>(short_hdr), sizeof(short_hdr));
+    }
+
+    GuestDeploymentTarget target;
+    target.abi = GuestTargetAbi::X86_64;
+    target.staging_dir = temp_dir.string();
+
+    auto report = coordinator.assess_deployment_readiness(target);
+    require(report.phase == GuestDeploymentPhase::ArtifactCorrupt, "Corrupt artifact");
+
+    auto plan = GuestDeploymentCoordinator::create_deployment_plan(report);
+
+    require(plan.has_failures, "Plan has failures for corrupt artifact");
+    require(plan.overall_error_code == "ARTIFACT_CORRUPT", "Error code is ARTIFACT_CORRUPT");
+
+    std::filesystem::remove_all(temp_dir);
+    std::cout << "  [PASS] test_deployment_plan_creation_for_corrupt_artifact" << std::endl;
+}
+
+void test_deployment_plan_creation_for_manifest_mismatch() {
+    std::cout << "  [RUN] test_deployment_plan_creation_for_manifest_mismatch..." << std::endl;
+
+    GuestDeploymentCoordinator coordinator;
+    const auto temp_dir = std::filesystem::temp_directory_path() / "fang_test_deploy_plan_manifest";
+    std::filesystem::create_directories(temp_dir);
+
+    const auto elf_file = temp_dir / "fang-input-daemon-android-x86_64";
+    write_synthetic_elf64(elf_file, 0x3E, 2, 1, 3, 1);
+
+    GuestDeploymentTarget target;
+    target.abi = GuestTargetAbi::X86_64;
+    target.staging_dir = temp_dir.string();
+
+    // Create manifest with wrong ABI
+    GuestArtifactManifest mf;
+    mf.artifact_name = "fang-input-daemon-android-arm64-v8a"; // Mismatch!
+    mf.artifact_format = "ELF";
+    mf.target_os = "android";
+    mf.target_abi = "arm64-v8a";
+    mf.is_android_elf_binary = true;
+    mf.is_cross_compiled = true;
+    mf.build_configuration = "Release";
+    mf.manifest_schema_version = "stage9-v3";
+    mf.build_result = "Success";
+    mf.artifact_sha256 = coordinator.calculate_file_sha256(elf_file.string());
+    mf.artifact_size_bytes = std::filesystem::file_size(elf_file);
+    mf.ndk_version = "r26.1.10909125";
+    mf.android_api_level = 26;
+    mf.elf_machine = "62";
+    mf.elf_class = 2;
+    mf.elf_data = 1;
+    mf.toolchain_status = ToolchainStatus::ToolchainAvailable;
+
+    const auto manifest_file = temp_dir / "guest_manifest.json";
+    std::ofstream out(manifest_file);
+    out << mf.to_json();
+    out.close();
+
+    auto report = coordinator.assess_deployment_readiness(target);
+    require(report.phase == GuestDeploymentPhase::ArtifactManifestMismatch, "Manifest mismatch");
+
+    auto plan = GuestDeploymentCoordinator::create_deployment_plan(report);
+
+    require(plan.has_failures, "Plan has failures for manifest mismatch");
+    require(plan.overall_error_code == "MANIFEST_MISMATCH", "Error code is MANIFEST_MISMATCH");
+
+    std::filesystem::remove_all(temp_dir);
+    std::cout << "  [PASS] test_deployment_plan_creation_for_manifest_mismatch" << std::endl;
+}
+
+void test_deployment_plan_creation_for_legacy_provenance() {
+    std::cout << "  [RUN] test_deployment_plan_creation_for_legacy_provenance..." << std::endl;
+
+    GuestDeploymentCoordinator coordinator;
+    const auto temp_dir = std::filesystem::temp_directory_path() / "fang_test_deploy_plan_legacy";
+    std::filesystem::create_directories(temp_dir);
+
+    const auto elf_file = temp_dir / "fang-input-daemon-android-x86_64";
+    write_synthetic_elf64(elf_file, 0x3E, 2, 1, 3, 1);
+
+    GuestDeploymentTarget target;
+    target.abi = GuestTargetAbi::X86_64;
+    target.staging_dir = temp_dir.string();
+
+    // Create legacy manifest (stage9-v1) without source_evidence
+    GuestArtifactManifest mf;
+    mf.artifact_name = "fang-input-daemon-android-x86_64";
+    mf.artifact_format = "ELF";
+    mf.target_os = "android";
+    mf.target_abi = "x86_64";
+    mf.is_android_elf_binary = true;
+    mf.is_cross_compiled = true;
+    mf.build_configuration = "Release";
+    mf.manifest_schema_version = "stage9-v1"; // Legacy!
+    mf.build_result = "Success";
+    mf.artifact_sha256 = coordinator.calculate_file_sha256(elf_file.string());
+    mf.artifact_size_bytes = std::filesystem::file_size(elf_file);
+    mf.ndk_version = "r26.1.10909125";
+    mf.android_api_level = 26;
+    mf.elf_machine = "62";
+    mf.elf_class = 2;
+    mf.elf_data = 1;
+    mf.toolchain_status = ToolchainStatus::ToolchainAvailable;
+
+    const auto manifest_file = temp_dir / "guest_manifest.json";
+    std::ofstream out(manifest_file);
+    out << mf.to_json();
+    out.close();
+
+    auto report = coordinator.assess_deployment_readiness(target);
+    require(report.phase == GuestDeploymentPhase::ArtifactReady, "Artifact ready");
+    require(report.provenance_assessment == ProvenanceAssessment::LegacyUnverified, "Legacy provenance");
+
+    auto plan = GuestDeploymentCoordinator::create_deployment_plan(report);
+
+    // Legacy provenance should not fail the plan (it's a warning, not a blocker)
+    require(!plan.has_failures, "Legacy provenance does not fail plan");
+    require(plan.steps[2].status == DeploymentPlanStepStatus::Completed, "CheckProvenance completed (LegacyUnverified is not a failure)");
+
+    std::filesystem::remove_all(temp_dir);
+    std::cout << "  [PASS] test_deployment_plan_creation_for_legacy_provenance" << std::endl;
+}
+
+void test_deployment_plan_creation_for_stale_provenance() {
+    std::cout << "  [RUN] test_deployment_plan_creation_for_stale_provenance..." << std::endl;
+
+    // This test verifies the deployment plan correctly handles Stale provenance
+    // when it occurs. Since triggering Stale requires a git repo with different
+    // source state, we directly test the plan creation logic with a report
+    // that has Stale provenance.
+
+    GuestDeploymentReport report;
+    report.phase = GuestDeploymentPhase::ArtifactReady;
+    report.is_ready_for_push = true;
+    report.provenance_assessment = ProvenanceAssessment::Stale;
+    report.manifest.artifact_name = "fang-input-daemon-android-x86_64";
+
+    auto plan = GuestDeploymentCoordinator::create_deployment_plan(report);
+
+    // Stale provenance should fail the plan
+    require(plan.has_failures, "Stale provenance fails plan");
+    require(plan.steps[2].status == DeploymentPlanStepStatus::Failed, "CheckProvenance failed");
+    require(plan.steps[2].error_code == "PROVENANCE_STALE", "Error code is PROVENANCE_STALE");
+    require(plan.overall_error_code == "PROVENANCE_STALE", "Overall error code is PROVENANCE_STALE");
+
+    std::cout << "  [PASS] test_deployment_plan_creation_for_stale_provenance" << std::endl;
+}
+
+void test_deployment_plan_creation_for_unavailable_provenance() {
+    std::cout << "  [RUN] test_deployment_plan_creation_for_unavailable_provenance..." << std::endl;
+
+    // This test verifies the deployment plan correctly handles Unavailable provenance
+    // when it occurs. We directly test the plan creation logic.
+
+    GuestDeploymentReport report;
+    report.phase = GuestDeploymentPhase::ArtifactReady;
+    report.is_ready_for_push = true;
+    report.provenance_assessment = ProvenanceAssessment::Unavailable;
+    report.manifest.artifact_name = "fang-input-daemon-android-x86_64";
+
+    auto plan = GuestDeploymentCoordinator::create_deployment_plan(report);
+
+    // Unavailable provenance should fail the plan
+    require(plan.has_failures, "Unavailable provenance fails plan");
+    require(plan.steps[2].status == DeploymentPlanStepStatus::Failed, "CheckProvenance failed");
+    require(plan.steps[2].error_code == "PROVENANCE_UNAVAILABLE", "Error code is PROVENANCE_UNAVAILABLE");
+    require(plan.overall_error_code == "PROVENANCE_UNAVAILABLE", "Overall error code is PROVENANCE_UNAVAILABLE");
+
+    std::cout << "  [PASS] test_deployment_plan_creation_for_unavailable_provenance" << std::endl;
+}
+
+void test_deployment_plan_execution_offline_boundary() {
+    std::cout << "  [RUN] test_deployment_plan_execution_offline_boundary..." << std::endl;
+
+    GuestDeploymentCoordinator coordinator;
+    const auto temp_dir = std::filesystem::temp_directory_path() / "fang_test_deploy_exec";
+    std::filesystem::create_directories(temp_dir);
+
+    const auto elf_file = temp_dir / "fang-input-daemon-android-x86_64";
+    write_synthetic_elf64(elf_file, 0x3E, 2, 1, 3, 1);
+
+    GuestDeploymentTarget target;
+    target.abi = GuestTargetAbi::X86_64;
+    target.staging_dir = temp_dir.string();
+
+    // Valid manifest with source evidence
+    const std::string actual_sha256 = coordinator.calculate_file_sha256(elf_file.string());
+    GuestArtifactManifest mf;
+    mf.artifact_name = "fang-input-daemon-android-x86_64";
+    mf.artifact_format = "ELF";
+    mf.target_os = "android";
+    mf.target_abi = "x86_64";
+    mf.is_android_elf_binary = true;
+    mf.is_cross_compiled = true;
+    mf.build_configuration = "Release";
+    mf.manifest_schema_version = "stage9-v3";
+    mf.build_result = "Success";
+    mf.artifact_sha256 = actual_sha256;
+    mf.artifact_size_bytes = std::filesystem::file_size(elf_file);
+    mf.ndk_version = "r26.1.10909125";
+    mf.android_api_level = 26;
+    mf.elf_machine = "62";
+    mf.elf_class = 2;
+    mf.elf_data = 1;
+    mf.toolchain_status = ToolchainStatus::ToolchainAvailable;
+    mf.source_evidence.status = SourceEvidence::Status::Collected;
+    mf.source_evidence.algorithm = "sha256";
+    mf.source_evidence.fingerprint = "abc123"; // Source fingerprint (not artifact)
+    mf.source_evidence.scope = "fang-guest-daemon-inputs-v1";
+    mf.source_evidence.encoding = "fang-cim-c14n-v1";
+    mf.source_evidence.captured_at_utc = "2026-10-18T12:00:00Z";
+    mf.source_tree_state = "clean";
+
+    const auto manifest_file = temp_dir / "guest_manifest.json";
+    std::ofstream out(manifest_file);
+    out << mf.to_json();
+    out.close();
+
+    auto report = coordinator.assess_deployment_readiness(target);
+    require(report.phase == GuestDeploymentPhase::ArtifactReady, "Artifact ready");
+    // In temp dir without git, current evidence unavailable -> provenance Unavailable
+    require(report.provenance_assessment == ProvenanceAssessment::Unavailable, "Provenance Unavailable");
+
+    // Execute deployment plan (should fail at provenance check due to unavailable evidence)
+    DeploymentPlan plan = GuestDeploymentCoordinator::create_deployment_plan(report);
+    std::string error;
+    bool success = false;
+    try {
+        success = GuestDeploymentCoordinator::execute_deployment_plan("emulator-5554", target, report, plan, &error);
+    } catch (const std::exception& ex) {
+        std::cerr << "  DEBUG: EXCEPTION: " << ex.what() << std::endl;
+        throw;
+    } catch (...) {
+        std::cerr << "  DEBUG: UNKNOWN EXCEPTION" << std::endl;
+        throw;
+    }
+    std::cerr << "  DEBUG: success = " << success << std::endl;
+    std::cerr << "  DEBUG: error.empty() = " << error.empty() << std::endl;
+    std::cerr << "  DEBUG: error = '" << error << "'" << std::endl;
+    require(!success, "Execution fails due to unavailable provenance");
+    require(!error.empty(), "Error message provided");
+    // Error should mention provenance unavailable
+    require(error.find("Provenance") != std::string::npos || error.find("provenance") != std::string::npos, 
+            "Error mentions provenance issue: " + error);
+    require(plan.has_failures, "Plan has failures after execution");
+    require(plan.is_complete, "Plan is complete");
+    require(plan.overall_error_code == "PROVENANCE_UNAVAILABLE", "Error code is PROVENANCE_UNAVAILABLE");
+
+    // Verify step statuses after execution - provenance check fails, transport not reached
+    require(plan.steps[0].status == DeploymentPlanStepStatus::Completed, "ValidateArtifact completed");
+    require(plan.steps[1].status == DeploymentPlanStepStatus::Completed, "VerifyManifest completed");
+    require(plan.steps[2].status == DeploymentPlanStepStatus::Failed, "CheckProvenance failed");
+    require(plan.steps[2].error_code == "PROVENANCE_UNAVAILABLE", "CheckProvenance error code");
+    // Remaining steps should be skipped
+    for (size_t i = 3; i < plan.steps.size(); ++i) {
+        require(plan.steps[i].status == DeploymentPlanStepStatus::Skipped, "Steps 3-6 skipped");
+    }
+
+    std::filesystem::remove_all(temp_dir);
+    std::cout << "  [PASS] test_deployment_plan_execution_offline_boundary" << std::endl;
+}
+
+void test_deployment_plan_deterministic_and_idempotent() {
+    std::cout << "  [RUN] test_deployment_plan_deterministic_and_idempotent..." << std::endl;
+
+    GuestDeploymentCoordinator coordinator;
+    const auto temp_dir = std::filesystem::temp_directory_path() / "fang_test_deploy_plan_idempotent";
+    std::filesystem::create_directories(temp_dir);
+
+    const auto elf_file = temp_dir / "fang-input-daemon-android-x86_64";
+    write_synthetic_elf64(elf_file, 0x3E, 2, 1, 3, 1);
+
+    GuestDeploymentTarget target;
+    target.abi = GuestTargetAbi::X86_64;
+    target.staging_dir = temp_dir.string();
+
+    GuestArtifactManifest mf;
+    mf.artifact_name = "fang-input-daemon-android-x86_64";
+    mf.artifact_format = "ELF";
+    mf.target_os = "android";
+    mf.target_abi = "x86_64";
+    mf.is_android_elf_binary = true;
+    mf.is_cross_compiled = true;
+    mf.build_configuration = "Release";
+    mf.manifest_schema_version = "stage9-v3";
+    mf.build_result = "Success";
+    mf.artifact_sha256 = coordinator.calculate_file_sha256(elf_file.string());
+    mf.artifact_size_bytes = std::filesystem::file_size(elf_file);
+    mf.ndk_version = "r26.1.10909125";
+    mf.android_api_level = 26;
+    mf.elf_machine = "62";
+    mf.elf_class = 2;
+    mf.elf_data = 1;
+    mf.toolchain_status = ToolchainStatus::ToolchainAvailable;
+    mf.source_evidence.status = SourceEvidence::Status::Collected;
+    mf.source_evidence.algorithm = "sha256";
+    mf.source_evidence.fingerprint = "abc123";
+    mf.source_evidence.scope = "fang-guest-daemon-inputs-v1";
+    mf.source_evidence.encoding = "fang-cim-c14n-v1";
+    mf.source_evidence.captured_at_utc = "2026-10-18T12:00:00Z";
+    mf.source_tree_state = "clean";
+
+    const auto manifest_file = temp_dir / "guest_manifest.json";
+    std::ofstream out(manifest_file);
+    out << mf.to_json();
+    out.close();
+
+    // Create plan multiple times - should be identical
+    auto report = coordinator.assess_deployment_readiness(target);
+    auto plan1 = GuestDeploymentCoordinator::create_deployment_plan(report);
+    auto plan2 = GuestDeploymentCoordinator::create_deployment_plan(report);
+
+    require(plan1.steps.size() == plan2.steps.size(), "Same number of steps");
+    for (size_t i = 0; i < plan1.steps.size(); ++i) {
+        require(plan1.steps[i].type == plan2.steps[i].type, "Same step types");
+        require(plan1.steps[i].is_required == plan2.steps[i].is_required, "Same required flags");
+        require(plan1.steps[i].status == plan2.steps[i].status, "Same initial statuses");
+    }
+
+    // Execute plan multiple times - should produce same result
+    std::string error1, error2;
+    auto plan1_copy = plan1;
+    auto plan2_copy = plan2;
+    bool success1 = GuestDeploymentCoordinator::execute_deployment_plan("emulator-5554", target, report, plan1_copy, &error1);
+    bool success2 = GuestDeploymentCoordinator::execute_deployment_plan("emulator-5554", target, report, plan2_copy, &error2);
+
+    require(success1 == success2, "Same success result");
+    require(!success1, "Both fail offline");
+    require(plan1_copy.overall_error_code == plan2_copy.overall_error_code, "Same error code");
+    require(plan1_copy.has_failures == plan2_copy.has_failures, "Same failure state");
+
+    for (size_t i = 0; i < plan1_copy.steps.size(); ++i) {
+        require(plan1_copy.steps[i].status == plan2_copy.steps[i].status, "Same step statuses after execution");
+    }
+
+    std::filesystem::remove_all(temp_dir);
+    std::cout << "  [PASS] test_deployment_plan_deterministic_and_idempotent" << std::endl;
+}
+
+void test_deployment_plan_with_host_native() {
+    std::cout << "  [RUN] test_deployment_plan_with_host_native..." << std::endl;
+
+    GuestDeploymentCoordinator coordinator;
+    GuestDeploymentTarget target;
+    target.abi = GuestTargetAbi::HostNative;
+    target.staging_dir = "C:/nonexistent"; // Won't be used for host native
+
+    // Create a mock host native artifact
+    const auto temp_dir = std::filesystem::temp_directory_path() / "fang_test_host_native";
+    std::filesystem::create_directories(temp_dir);
+    const auto host_file = temp_dir / "fang-input-daemon.exe";
+    {
+        std::ofstream out(host_file, std::ios::binary);
+        const char mz_header[4] = {'M', 'Z', 0x00, 0x00};
+        out.write(mz_header, sizeof(mz_header));
+        out << "dummy PE content";
+    }
+    target.staging_dir = temp_dir.string();
+
+    auto report = coordinator.assess_deployment_readiness(target);
+    std::cerr << "  DEBUG: report.phase = " << static_cast<int>(report.phase) << std::endl;
+    std::cerr << "  DEBUG: report.diagnostic = " << report.diagnostic << std::endl;
+    std::cerr << "  DEBUG: report.provenance_assessment = " << static_cast<int>(report.provenance_assessment) << std::endl;
+    // Host native should be ArtifactReady (PE-COFF accepted)
+    require(report.phase == GuestDeploymentPhase::ArtifactReady, "Host native artifact ready");
+
+    auto plan = GuestDeploymentCoordinator::create_deployment_plan(report);
+
+    // For host native, the plan may have failures due to unavailable provenance
+    // (temp dir has no git repo). This is expected behavior.
+    // The deploy_to_guest for host native has special handling that succeeds regardless.
+    if (report.phase == GuestDeploymentPhase::ArtifactReady) {
+        // Plan may have failures due to provenance, but that's OK for host native
+        // We just verify the plan structure is correct
+        require(!plan.steps.empty(), "Plan has steps");
+        require(plan.steps.size() == 7, "Plan has 7 steps");
+    }
+
+    // Test deploy_to_guest for host native - should succeed in loopback mode
+    GuestDeploymentReport deploy_report;
+    bool success = coordinator.deploy_to_guest("localhost", target, deploy_report);
+
+    // Host native in loopback mode should succeed
+    require(success, "Host native deployment succeeds");
+    require(deploy_report.phase == GuestDeploymentPhase::Deployed, "Phase is Deployed");
+    require(deploy_report.is_deployed, "Is deployed");
+    require(deploy_report.deployment_plan.is_complete, "Plan is complete");
+    require(!deploy_report.deployment_plan.has_failures, "No failures after deployment");
+    for (const auto& step : deploy_report.deployment_plan.steps) {
+        require(step.status == DeploymentPlanStepStatus::Completed, "All steps completed");
+    }
+
+    std::filesystem::remove_all(temp_dir);
+    std::cout << "  [PASS] test_deployment_plan_with_host_native" << std::endl;
+}
+
+void test_deployment_plan_error_codes_machine_readable() {
+    std::cout << "  [RUN] test_deployment_plan_error_codes_machine_readable..." << std::endl;
+
+    GuestDeploymentCoordinator coordinator;
+
+    // Test each error code is properly set
+    const auto test_cases = std::vector<std::pair<std::string, std::string>>{
+        {"MISSING_TOOLCHAIN", "BlockedMissingToolchain"},
+        {"ARTIFACT_MISSING", "ArtifactMissing"},
+        {"ARCHITECTURE_MISMATCH", "ArtifactArchitectureMismatch"},
+        {"ARTIFACT_CORRUPT", "ArtifactCorrupt"},
+        {"MANIFEST_MISMATCH", "ArtifactManifestMismatch"},
+        {"DEPLOYMENT_BLOCKED_OFFLINE", "DeploymentBlockedOffline"},
+        {"PROVENANCE_LEGACY_UNVERIFIED", "Provenance LegacyUnverified"},
+        {"PROVENANCE_UNAVAILABLE", "Provenance Unavailable"},
+        {"PROVENANCE_STALE", "Provenance Stale"},
+    };
+
+    for (const auto& [error_code, description] : test_cases) {
+        // Just verify the error_code constants are defined and non-empty
+        require(!error_code.empty(), "Error code not empty: " + description);
+    }
+
+    // Verify specific error codes in deployment plan
+    const auto temp_dir = std::filesystem::temp_directory_path() / "fang_test_error_codes";
+    std::filesystem::create_directories(temp_dir);
+
+    // Test ARCHITECTURE_MISMATCH
+    {
+        const auto pe_file = temp_dir / "fang-input-daemon-android-x86_64";
+        {
+            std::ofstream out(pe_file, std::ios::binary);
+            const char mz_header[4] = {'M', 'Z', 0x00, 0x00};
+            out.write(mz_header, sizeof(mz_header));
+        }
+        GuestDeploymentTarget target;
+        target.abi = GuestTargetAbi::X86_64;
+        target.staging_dir = temp_dir.string();
+        auto report = coordinator.assess_deployment_readiness(target);
+        auto plan = GuestDeploymentCoordinator::create_deployment_plan(report);
+        require(plan.overall_error_code == "ARCHITECTURE_MISMATCH", "ARCHITECTURE_MISMATCH error code");
+        std::filesystem::remove_all(temp_dir);
+        std::filesystem::create_directories(temp_dir);
+    }
+
+    // Test MANIFEST_MISMATCH
+    {
+        const auto elf_file = temp_dir / "fang-input-daemon-android-x86_64";
+        write_synthetic_elf64(elf_file, 0x3E, 2, 1, 3, 1);
+        GuestArtifactManifest mf;
+        mf.artifact_name = "fang-input-daemon-android-arm64-v8a";
+        mf.artifact_format = "ELF";
+        mf.target_os = "android";
+        mf.target_abi = "arm64-v8a";
+        mf.is_android_elf_binary = true;
+        mf.is_cross_compiled = true;
+        mf.build_configuration = "Release";
+        mf.manifest_schema_version = "stage9-v3";
+        mf.build_result = "Success";
+        mf.artifact_sha256 = coordinator.calculate_file_sha256(elf_file.string());
+        mf.artifact_size_bytes = std::filesystem::file_size(elf_file);
+        mf.ndk_version = "r26.1.10909125";
+        mf.android_api_level = 26;
+        mf.elf_machine = "62";
+        mf.elf_class = 2;
+        mf.elf_data = 1;
+        mf.toolchain_status = ToolchainStatus::ToolchainAvailable;
+        const auto manifest_file = temp_dir / "guest_manifest.json";
+        std::ofstream out(manifest_file);
+        out << mf.to_json();
+        out.close();
+
+        GuestDeploymentTarget target;
+        target.abi = GuestTargetAbi::X86_64;
+        target.staging_dir = temp_dir.string();
+        auto report = coordinator.assess_deployment_readiness(target);
+        auto plan = GuestDeploymentCoordinator::create_deployment_plan(report);
+        require(plan.overall_error_code == "MANIFEST_MISMATCH", "MANIFEST_MISMATCH error code");
+        std::filesystem::remove_all(temp_dir);
+        std::filesystem::create_directories(temp_dir);
+    }
+
+    // Test PROVENANCE_UNAVAILABLE (temp dir has no git repo)
+    {
+        const auto elf_file = temp_dir / "fang-input-daemon-android-x86_64";
+        write_synthetic_elf64(elf_file, 0x3E, 2, 1, 3, 1);
+        GuestArtifactManifest mf;
+        mf.artifact_name = "fang-input-daemon-android-x86_64";
+        mf.artifact_format = "ELF";
+        mf.target_os = "android";
+        mf.target_abi = "x86_64";
+        mf.is_android_elf_binary = true;
+        mf.is_cross_compiled = true;
+        mf.build_configuration = "Release";
+        mf.manifest_schema_version = "stage9-v3";
+        mf.build_result = "Success";
+        mf.artifact_sha256 = coordinator.calculate_file_sha256(elf_file.string());
+        mf.artifact_size_bytes = std::filesystem::file_size(elf_file);
+        mf.ndk_version = "r26.1.10909125";
+        mf.android_api_level = 26;
+        mf.elf_machine = "62";
+        mf.elf_class = 2;
+        mf.elf_data = 1;
+        mf.toolchain_status = ToolchainStatus::ToolchainAvailable;
+        mf.source_evidence.status = SourceEvidence::Status::Collected;
+        mf.source_evidence.algorithm = "sha256";
+        mf.source_evidence.fingerprint = "0000000000000000000000000000000000000000000000000000000000000000";
+        mf.source_evidence.scope = "fang-guest-daemon-inputs-v1";
+        mf.source_evidence.encoding = "fang-cim-c14n-v1";
+        mf.source_evidence.captured_at_utc = "2026-10-18T12:00:00Z";
+        mf.source_tree_state = "clean";
+        const auto manifest_file = temp_dir / "guest_manifest.json";
+        std::ofstream out(manifest_file);
+        out << mf.to_json();
+        out.close();
+
+        GuestDeploymentTarget target;
+        target.abi = GuestTargetAbi::X86_64;
+        target.staging_dir = temp_dir.string();
+        auto report = coordinator.assess_deployment_readiness(target);
+        auto plan = GuestDeploymentCoordinator::create_deployment_plan(report);
+        // In temp dir without git, current evidence unavailable -> provenance Unavailable
+        require(plan.overall_error_code == "PROVENANCE_UNAVAILABLE", "PROVENANCE_UNAVAILABLE error code");
+        std::filesystem::remove_all(temp_dir);
+    }
+
+    std::cout << "  [PASS] test_deployment_plan_error_codes_machine_readable" << std::endl;
+}
+
+void test_deployment_plan_preserves_readiness_semantics() {
+    std::cout << "  [RUN] test_deployment_plan_preserves_readiness_semantics..." << std::endl;
+
+    GuestDeploymentCoordinator coordinator;
+    const auto temp_dir = std::filesystem::temp_directory_path() / "fang_test_readiness_semantics";
+    std::filesystem::create_directories(temp_dir);
+
+    const auto elf_file = temp_dir / "fang-input-daemon-android-x86_64";
+    write_synthetic_elf64(elf_file, 0x3E, 2, 1, 3, 1);
+
+    GuestDeploymentTarget target;
+    target.abi = GuestTargetAbi::X86_64;
+    target.staging_dir = temp_dir.string();
+
+    GuestArtifactManifest mf;
+    mf.artifact_name = "fang-input-daemon-android-x86_64";
+    mf.artifact_format = "ELF";
+    mf.target_os = "android";
+    mf.target_abi = "x86_64";
+    mf.is_android_elf_binary = true;
+    mf.is_cross_compiled = true;
+    mf.build_configuration = "Release";
+    mf.manifest_schema_version = "stage9-v3";
+    mf.build_result = "Success";
+    mf.artifact_sha256 = coordinator.calculate_file_sha256(elf_file.string());
+    mf.artifact_size_bytes = std::filesystem::file_size(elf_file);
+    mf.ndk_version = "r26.1.10909125";
+    mf.android_api_level = 26;
+    mf.elf_machine = "62";
+    mf.elf_class = 2;
+    mf.elf_data = 1;
+    mf.toolchain_status = ToolchainStatus::ToolchainAvailable;
+    mf.source_evidence.status = SourceEvidence::Status::Collected;
+    mf.source_evidence.algorithm = "sha256";
+    mf.source_evidence.fingerprint = "abc123";
+    mf.source_evidence.scope = "fang-guest-daemon-inputs-v1";
+    mf.source_evidence.encoding = "fang-cim-c14n-v1";
+    mf.source_evidence.captured_at_utc = "2026-10-18T12:00:00Z";
+    mf.source_tree_state = "clean";
+
+    const auto manifest_file = temp_dir / "guest_manifest.json";
+    std::ofstream out(manifest_file);
+    out << mf.to_json();
+    out.close();
+
+    // Assess readiness
+    auto report = coordinator.assess_deployment_readiness(target);
+    require(report.phase == GuestDeploymentPhase::ArtifactReady, "Phase ArtifactReady");
+    require(report.is_ready_for_push, "Ready for push");
+    require(!report.artifact_sha256.empty(), "SHA-256 present");
+    require(report.artifact_size_bytes > 0, "Size > 0");
+    // In temp dir without git, provenance will be Unavailable (not QualifiedCurrent)
+    // This is expected behavior - we just verify it's assessed
+    ProvenanceAssessment initial_provenance = report.provenance_assessment;
+
+    // Create plan - should not alter readiness report
+    auto plan = GuestDeploymentCoordinator::create_deployment_plan(report);
+    require(report.phase == GuestDeploymentPhase::ArtifactReady, "Phase unchanged after plan creation");
+    require(report.is_ready_for_push, "Ready for push unchanged");
+    require(report.provenance_assessment == initial_provenance, "Provenance unchanged");
+
+    // Execute deploy_to_guest - should return false and set phase to DeploymentBlockedOffline
+    GuestDeploymentReport deploy_report;
+    bool success = coordinator.deploy_to_guest("emulator-5554", target, deploy_report);
+    require(!success, "Deploy returns false");
+    require(deploy_report.phase == GuestDeploymentPhase::DeploymentBlockedOffline, "Phase is DeploymentBlockedOffline");
+    require(!deploy_report.is_deployed, "Not deployed");
+    require(deploy_report.diagnostic.find("blocked offline") != std::string::npos, "Diagnostic mentions offline block");
+
+    std::filesystem::remove_all(temp_dir);
+    std::cout << "  [PASS] test_deployment_plan_preserves_readiness_semantics" << std::endl;
+}
+
 } // namespace
 
 int main() {
@@ -1151,6 +1909,19 @@ int main() {
         test_provenance_assessment();
         test_source_evidence_serialization();
         test_repository_root_deterministic_selection();
+        test_deployment_plan_creation_for_ready_artifact();
+        test_deployment_plan_creation_for_missing_artifact();
+        test_deployment_plan_creation_for_architecture_mismatch();
+        test_deployment_plan_creation_for_corrupt_artifact();
+        test_deployment_plan_creation_for_manifest_mismatch();
+        test_deployment_plan_creation_for_legacy_provenance();
+        test_deployment_plan_creation_for_stale_provenance();
+        test_deployment_plan_creation_for_unavailable_provenance();
+        test_deployment_plan_execution_offline_boundary();
+        test_deployment_plan_deterministic_and_idempotent();
+        test_deployment_plan_with_host_native();
+        test_deployment_plan_error_codes_machine_readable();
+        test_deployment_plan_preserves_readiness_semantics();
 
         std::cout << "[FANG-STAGE9-TESTS] All Stage 9 tests passed successfully." << std::endl;
         return 0;

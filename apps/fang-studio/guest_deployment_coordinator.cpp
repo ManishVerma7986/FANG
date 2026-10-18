@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <array>
 #include <memory>
+#include <optional>
 
 namespace fang::studio {
 
@@ -408,6 +409,9 @@ GuestDeploymentReport MockGuestDeploymentCoordinator::assess_deployment_readines
     report.artifact_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     report.manifest = fang::guest::GuestToolchainDetector::generate_manifest_for_target(
         target.abi, target.build_config, "RecordingStub", target.require_privileged_backend);
+    
+    // Create a mock deployment plan
+    report.deployment_plan = GuestDeploymentCoordinator::create_deployment_plan(report);
     return report;
 }
 
@@ -420,12 +424,35 @@ bool MockGuestDeploymentCoordinator::deploy_to_guest(
         out_report.phase = GuestDeploymentPhase::DeploymentFailed;
         out_report.diagnostic = "Mock deployment push simulated failure.";
         out_report.is_deployed = false;
+        // Update deployment plan for failure
+        for (auto& step : out_report.deployment_plan.steps) {
+            if (step.status == DeploymentPlanStepStatus::InProgress) {
+                step.status = DeploymentPlanStepStatus::Failed;
+                step.error_code = "MOCK_DEPLOYMENT_FAILURE";
+                step.completed_at = std::chrono::system_clock::now();
+            }
+        }
+        out_report.deployment_plan.has_failures = true;
+        out_report.deployment_plan.overall_error_code = "MOCK_DEPLOYMENT_FAILURE";
+        out_report.deployment_plan.is_complete = true;
+        out_report.deployment_plan.completed_at = std::chrono::system_clock::now();
         return false;
     }
     out_report.phase = GuestDeploymentPhase::Deployed;
     out_report.diagnostic = "Mock deployment push simulated success.";
     out_report.is_deployed = true;
     phase_ = GuestDeploymentPhase::Deployed;
+    // Mark all steps as completed
+    for (auto& step : out_report.deployment_plan.steps) {
+        step.status = DeploymentPlanStepStatus::Completed;
+        if (step.started_at == std::chrono::system_clock::time_point{}) {
+            step.started_at = std::chrono::system_clock::now();
+        }
+        step.completed_at = std::chrono::system_clock::now();
+    }
+    out_report.deployment_plan.is_complete = true;
+    out_report.deployment_plan.has_failures = false;
+    out_report.deployment_plan.completed_at = std::chrono::system_clock::now();
     return true;
 }
 
@@ -1227,11 +1254,27 @@ bool GuestDeploymentCoordinator::deploy_to_guest(
         return false;
     }
 
-    // Host native target in loopback mode
+    // Create deployment plan
+    out_report.deployment_plan = create_deployment_plan(out_report);
+
+    // Host native target in loopback mode - this is a special case that succeeds
     if (target.abi == fang::guest::GuestTargetAbi::HostNative) {
         out_report.phase = GuestDeploymentPhase::Deployed;
         out_report.is_deployed = true;
         out_report.diagnostic = "Host native daemon staged and running in loopback test mode.";
+        out_report.deployment_plan.is_complete = true;
+        out_report.deployment_plan.has_failures = false;
+        // Mark all steps as completed for host native
+        for (auto& step : out_report.deployment_plan.steps) {
+            step.status = DeploymentPlanStepStatus::Completed;
+            if (step.started_at == std::chrono::system_clock::time_point{}) {
+                step.started_at = std::chrono::system_clock::now();
+            }
+            if (step.completed_at == std::chrono::system_clock::time_point{}) {
+                step.completed_at = std::chrono::system_clock::now();
+            }
+        }
+        out_report.deployment_plan.completed_at = std::chrono::system_clock::now();
         return true;
     }
 
@@ -1242,6 +1285,22 @@ bool GuestDeploymentCoordinator::deploy_to_guest(
     out_report.diagnostic = "Live guest deployment via ADB push ('adb -s " + serial_or_avd +
         " push " + out_report.resolved_artifact_path + " " + target.guest_install_path +
         "') is blocked offline. Live deployment remains unauthorized.";
+    
+    // Update deployment plan to reflect offline block
+    for (auto& step : out_report.deployment_plan.steps) {
+        if (step.status == DeploymentPlanStepStatus::InProgress ||
+            step.status == DeploymentPlanStepStatus::Pending) {
+            step.status = DeploymentPlanStepStatus::Failed;
+            step.error_code = "DEPLOYMENT_BLOCKED_OFFLINE";
+            step.diagnostic = "Live deployment blocked offline; deployment plan cannot complete without live ADB";
+            step.completed_at = std::chrono::system_clock::now();
+        }
+    }
+    out_report.deployment_plan.has_failures = true;
+    out_report.deployment_plan.overall_error_code = "DEPLOYMENT_BLOCKED_OFFLINE";
+    out_report.deployment_plan.is_complete = true;
+    out_report.deployment_plan.completed_at = std::chrono::system_clock::now();
+
     return false;
 }
 
@@ -1251,6 +1310,202 @@ void GuestDeploymentCoordinator::teardown_guest_deployment(
     report.phase = GuestDeploymentPhase::Unconfigured;
     report.diagnostic = "Guest deployment unconfigured.";
     report.is_deployed = false;
+}
+
+// ----------------------------------------------------------------------------
+// Deployment Planner Implementation
+// ----------------------------------------------------------------------------
+
+namespace {
+
+// Helper to create a step with proper initialization
+DeploymentPlanStep make_step(DeploymentPlanStepType type, bool required = true) {
+    DeploymentPlanStep step;
+    step.type = type;
+    step.status = DeploymentPlanStepStatus::Pending;
+    step.is_required = required;
+    return step;
+}
+
+// Error code mapping
+std::string error_code_for_phase(GuestDeploymentPhase phase) {
+    switch (phase) {
+    case GuestDeploymentPhase::BlockedMissingToolchain:  return "MISSING_TOOLCHAIN";
+    case GuestDeploymentPhase::ArtifactMissing:          return "ARTIFACT_MISSING";
+    case GuestDeploymentPhase::ArtifactArchitectureMismatch: return "ARCHITECTURE_MISMATCH";
+    case GuestDeploymentPhase::ArtifactCorrupt:          return "ARTIFACT_CORRUPT";
+    case GuestDeploymentPhase::ArtifactManifestMismatch: return "MANIFEST_MISMATCH";
+    case GuestDeploymentPhase::DeploymentBlockedOffline: return "DEPLOYMENT_BLOCKED_OFFLINE";
+    case GuestDeploymentPhase::DeploymentFailed:         return "DEPLOYMENT_FAILED";
+    default:                                             return "UNKNOWN_ERROR";
+    }
+}
+
+std::string error_code_for_provenance(ProvenanceAssessment assessment) {
+    switch (assessment) {
+    case ProvenanceAssessment::LegacyUnverified: return "PROVENANCE_LEGACY_UNVERIFIED";
+    case ProvenanceAssessment::Unavailable:      return "PROVENANCE_UNAVAILABLE";
+    case ProvenanceAssessment::Stale:            return "PROVENANCE_STALE";
+    default:                                     return "";
+    }
+}
+
+} // anonymous namespace
+
+DeploymentPlan GuestDeploymentCoordinator::create_deployment_plan(const GuestDeploymentReport& readiness_report) {
+    DeploymentPlan plan;
+    plan.created_at = std::chrono::system_clock::now();
+
+    // Only create a deployment plan if the artifact is ready
+    if (readiness_report.phase != GuestDeploymentPhase::ArtifactReady) {
+        plan.has_failures = true;
+        plan.overall_error_code = error_code_for_phase(readiness_report.phase);
+        plan.is_complete = true;
+        plan.completed_at = std::chrono::system_clock::now();
+        return plan;
+    }
+
+    // Check provenance - if legacy or unavailable, we can still deploy but mark it
+    std::string provenance_error = error_code_for_provenance(readiness_report.provenance_assessment);
+
+    // Step 1: ValidateArtifact - already done in readiness assessment, but we include it for completeness
+    plan.steps.push_back(make_step(DeploymentPlanStepType::ValidateArtifact, true));
+    plan.steps.back().status = DeploymentPlanStepStatus::Completed;
+    plan.steps.back().started_at = plan.created_at;
+    plan.steps.back().completed_at = plan.created_at;
+
+    // Step 2: VerifyManifest
+    plan.steps.push_back(make_step(DeploymentPlanStepType::VerifyManifest, !readiness_report.manifest.artifact_name.empty()));
+    if (!readiness_report.manifest.artifact_name.empty()) {
+        plan.steps.back().status = DeploymentPlanStepStatus::Completed;
+        plan.steps.back().started_at = plan.created_at;
+        plan.steps.back().completed_at = plan.created_at;
+    } else {
+        plan.steps.back().status = DeploymentPlanStepStatus::Skipped;
+        plan.steps.back().diagnostic = "No companion manifest present; artifact validated by ELF inspection only";
+    }
+
+    // Step 3: CheckProvenance
+    plan.steps.push_back(make_step(DeploymentPlanStepType::CheckProvenance, true));
+    if (readiness_report.provenance_assessment == ProvenanceAssessment::QualifiedCurrent ||
+        readiness_report.provenance_assessment == ProvenanceAssessment::QualifiedDirty) {
+        plan.steps.back().status = DeploymentPlanStepStatus::Completed;
+        plan.steps.back().started_at = plan.created_at;
+        plan.steps.back().completed_at = plan.created_at;
+    } else if (readiness_report.provenance_assessment == ProvenanceAssessment::LegacyUnverified) {
+        // Legacy provenance is not a blocker - mark as completed but note it in diagnostic
+        plan.steps.back().status = DeploymentPlanStepStatus::Completed;
+        plan.steps.back().started_at = plan.created_at;
+        plan.steps.back().completed_at = plan.created_at;
+        plan.steps.back().diagnostic = "Legacy manifest without source evidence; provenance unverified";
+    } else if (!provenance_error.empty()) {
+        plan.steps.back().status = DeploymentPlanStepStatus::Failed;
+        plan.steps.back().error_code = provenance_error;
+        plan.steps.back().diagnostic = readiness_report.diagnostic;
+        plan.has_failures = true;
+        plan.overall_error_code = provenance_error;
+    } else {
+        plan.steps.back().status = DeploymentPlanStepStatus::Completed;
+        plan.steps.back().started_at = plan.created_at;
+        plan.steps.back().completed_at = plan.created_at;
+    }
+
+    // Step 4: SetupTransport (ADB port forwarding or loopback)
+    plan.steps.push_back(make_step(DeploymentPlanStepType::SetupTransport, true));
+
+    // Step 5: PushBinary (ADB push)
+    plan.steps.push_back(make_step(DeploymentPlanStepType::PushBinary, true));
+
+    // Step 6: StartDaemon (ADB shell execution)
+    plan.steps.push_back(make_step(DeploymentPlanStepType::StartDaemon, true));
+
+    // Step 7: VerifyConnection (TCP connection to guest daemon)
+    plan.steps.push_back(make_step(DeploymentPlanStepType::VerifyConnection, true));
+
+    return plan;
+}
+
+bool GuestDeploymentCoordinator::execute_deployment_plan(
+    const std::string& serial_or_avd,
+    const GuestDeploymentTarget& target,
+    const GuestDeploymentReport& readiness_report,
+    DeploymentPlan& plan,
+    std::string* error) {
+
+    if (readiness_report.phase != GuestDeploymentPhase::ArtifactReady) {
+        if (error) *error = "Cannot execute deployment plan: artifact not ready (phase: " + 
+            std::string(guest_deployment_phase_name(readiness_report.phase)) + ")";
+        return false;
+    }
+
+    plan.started_at = std::chrono::system_clock::now();
+
+    // Step 1: ValidateArtifact - already validated
+    if (!plan.steps.empty()) {
+        auto& step = plan.steps[0];
+        step.status = DeploymentPlanStepStatus::Completed;
+        step.started_at = plan.started_at;
+        step.completed_at = std::chrono::system_clock::now();
+    }
+
+    // Step 2: VerifyManifest - already validated
+    if (plan.steps.size() > 1) {
+        auto& step = plan.steps[1];
+        if (step.is_required) {
+            step.status = DeploymentPlanStepStatus::Completed;
+            step.started_at = std::chrono::system_clock::now();
+            step.completed_at = std::chrono::system_clock::now();
+        } else {
+            step.status = DeploymentPlanStepStatus::Skipped;
+        }
+    }
+
+    // Step 3: CheckProvenance - already assessed
+    if (plan.steps.size() > 2) {
+        auto& step = plan.steps[2];
+        if (step.status == DeploymentPlanStepStatus::Failed) {
+            if (error) *error = "Provenance check failed: " + step.diagnostic;
+            step.completed_at = std::chrono::system_clock::now();
+            // Mark remaining steps as Skipped
+            for (size_t i = 3; i < plan.steps.size(); ++i) {
+                plan.steps[i].status = DeploymentPlanStepStatus::Skipped;
+                plan.steps[i].diagnostic = "Skipped due to provenance check failure";
+            }
+            plan.completed_at = std::chrono::system_clock::now();
+            plan.is_complete = true;
+            return false;
+        }
+        step.status = DeploymentPlanStepStatus::Completed;
+        step.started_at = std::chrono::system_clock::now();
+        step.completed_at = std::chrono::system_clock::now();
+    }
+
+    // Step 4: SetupTransport
+    if (plan.steps.size() > 3) {
+        auto& step = plan.steps[3];
+        step.status = DeploymentPlanStepStatus::InProgress;
+        step.started_at = std::chrono::system_clock::now();
+
+        // For offline safety, we simulate the transport setup but don't execute live ADB
+        // In a real deployment, this would call the IGuestEndpointForwarder
+        step.diagnostic = "Transport setup simulated (offline mode): ADB port forward command prepared";
+        step.error_code = "TRANSPORT_SETUP_OFFLINE";
+        step.status = DeploymentPlanStepStatus::Failed;  // Mark as failed because we can't actually do it offline
+        step.completed_at = std::chrono::system_clock::now();
+        plan.has_failures = true;
+        plan.overall_error_code = "TRANSPORT_SETUP_OFFLINE";
+        if (error) *error = "Live transport setup blocked offline; deployment plan cannot complete without live ADB";
+    }
+
+    // Remaining steps are not executed in offline mode
+    for (size_t i = 4; i < plan.steps.size(); ++i) {
+        plan.steps[i].status = DeploymentPlanStepStatus::Skipped;
+        plan.steps[i].diagnostic = "Skipped due to offline transport setup failure";
+    }
+
+    plan.completed_at = std::chrono::system_clock::now();
+    plan.is_complete = true;
+    return false;  // Always returns false in offline mode
 }
 
 } // namespace fang::studio

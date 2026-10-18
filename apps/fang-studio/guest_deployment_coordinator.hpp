@@ -7,6 +7,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <optional>
+#include <chrono>
 
 namespace fang::studio {
 
@@ -69,6 +71,68 @@ struct GuestDeploymentTarget {
     bool require_privileged_backend{false};
 };
 
+enum class DeploymentPlanStepType : uint8_t {
+    ValidateArtifact,
+    VerifyManifest,
+    CheckProvenance,
+    SetupTransport,
+    PushBinary,
+    StartDaemon,
+    VerifyConnection
+};
+
+constexpr std::string_view deployment_plan_step_name(DeploymentPlanStepType type) noexcept {
+    switch (type) {
+    case DeploymentPlanStepType::ValidateArtifact:    return "ValidateArtifact";
+    case DeploymentPlanStepType::VerifyManifest:      return "VerifyManifest";
+    case DeploymentPlanStepType::CheckProvenance:     return "CheckProvenance";
+    case DeploymentPlanStepType::SetupTransport:      return "SetupTransport";
+    case DeploymentPlanStepType::PushBinary:          return "PushBinary";
+    case DeploymentPlanStepType::StartDaemon:         return "StartDaemon";
+    case DeploymentPlanStepType::VerifyConnection:    return "VerifyConnection";
+    default:                                          return "Unknown";
+    }
+}
+
+enum class DeploymentPlanStepStatus : uint8_t {
+    Pending,
+    InProgress,
+    Completed,
+    Failed,
+    Skipped
+};
+
+constexpr std::string_view deployment_plan_step_status_name(DeploymentPlanStepStatus status) noexcept {
+    switch (status) {
+    case DeploymentPlanStepStatus::Pending:    return "Pending";
+    case DeploymentPlanStepStatus::InProgress: return "InProgress";
+    case DeploymentPlanStepStatus::Completed:  return "Completed";
+    case DeploymentPlanStepStatus::Failed:     return "Failed";
+    case DeploymentPlanStepStatus::Skipped:    return "Skipped";
+    default:                                   return "Unknown";
+    }
+}
+
+struct DeploymentPlanStep {
+    DeploymentPlanStepType type;
+    DeploymentPlanStepStatus status{DeploymentPlanStepStatus::Pending};
+    std::string diagnostic;
+    std::chrono::system_clock::time_point started_at;
+    std::chrono::system_clock::time_point completed_at;
+    bool is_required{true};
+    std::string error_code;  // Machine-readable error code for failure diagnosis
+};
+
+struct DeploymentPlan {
+    std::vector<DeploymentPlanStep> steps;
+    std::chrono::system_clock::time_point created_at;
+    std::chrono::system_clock::time_point started_at;
+    std::chrono::system_clock::time_point completed_at;
+    bool is_complete{false};
+    bool has_failures{false};
+    std::string overall_error_code;
+};
+
 struct GuestDeploymentReport {
     GuestDeploymentPhase phase{GuestDeploymentPhase::Unconfigured};
     ProvenanceAssessment provenance_assessment{ProvenanceAssessment::Unassessed};
@@ -79,6 +143,7 @@ struct GuestDeploymentReport {
     fang::guest::GuestArtifactManifest manifest;
     bool is_ready_for_push{false};
     bool is_deployed{false};
+    DeploymentPlan deployment_plan;
 };
 
 class IGuestDeploymentCoordinator {
@@ -196,6 +261,15 @@ public:
         const fang::guest::GuestArtifactManifest& manifest,
         const fang::guest::SourceEvidence& current_evidence,
         std::string* diagnostic = nullptr);
+
+    // Deployment planner
+    static DeploymentPlan create_deployment_plan(const GuestDeploymentReport& readiness_report);
+    static bool execute_deployment_plan(
+        const std::string& serial_or_avd,
+        const GuestDeploymentTarget& target,
+        const GuestDeploymentReport& readiness_report,
+        DeploymentPlan& plan,
+        std::string* error = nullptr);
 };
 
 } // namespace fang::studio
