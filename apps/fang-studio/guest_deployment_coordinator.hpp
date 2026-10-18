@@ -122,8 +122,8 @@ struct DeploymentPlanStep {
     std::chrono::system_clock::time_point started_at;
     std::chrono::system_clock::time_point completed_at;
     bool is_required{true};
-    std::string error_code;  // Machine-readable error code for failure diagnosis
-    std::string detail;      // Additional detail (e.g., host port for SetupTransport)
+    std::string error_code;
+    std::string detail;
 };
 
 struct DeploymentPlan {
@@ -226,6 +226,11 @@ public:
     void set_transport(std::shared_ptr<IGuestTransport> transport) noexcept { transport_ = std::move(transport); }
     std::shared_ptr<IGuestTransport> transport() const noexcept { return transport_; }
 
+private:
+    std::shared_ptr<IGuestTransport> transport_;
+
+public:
+
     // Helpers
     static bool inspect_binary_format(
         const std::string& file_path,
@@ -287,8 +292,25 @@ public:
         DeploymentPlan& plan,
         std::string* error = nullptr);
 
-private:
-    std::shared_ptr<IGuestTransport> transport_;
+    // Offline deployment preflight - validates all prerequisites without live device
+    struct PreflightCheck {
+        std::string name;
+        bool passed{false};
+        std::string error_code;
+        std::string diagnostic;
+    };
+    
+    struct PreflightResult {
+        bool all_passed{false};
+        std::vector<PreflightCheck> checks;
+        std::string overall_error_code;
+    };
+    
+    static PreflightResult run_offline_preflight(
+        const GuestDeploymentTarget& target,
+        const std::string& staging_dir,
+        const std::string& transport_authorization_token = "",
+        const std::string& target_serial = "");
 };
 
 } // namespace fang::studio
