@@ -54,4 +54,19 @@ private:
     std::deque<std::byte> guest_to_host_queue_;
 };
 
+// Adapter exposing the guest-facing side of LoopbackInputTransport as an IInputTransport
+class LoopbackGuestEndpoint final : public IInputTransport {
+public:
+    explicit LoopbackGuestEndpoint(std::shared_ptr<LoopbackInputTransport> loopback);
+
+    bool connect() override;
+    void disconnect() override;
+    bool is_connected() const noexcept override;
+    bool send_bytes(std::span<const std::byte> bytes) override;
+    std::vector<std::byte> receive_bytes(std::size_t max_bytes) override;
+
+private:
+    std::shared_ptr<LoopbackInputTransport> loopback_;
+};
+
 } // namespace fang::studio

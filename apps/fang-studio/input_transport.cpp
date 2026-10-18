@@ -120,4 +120,29 @@ void LoopbackInputTransport::clear_buffers() {
     guest_to_host_queue_.clear();
 }
 
+LoopbackGuestEndpoint::LoopbackGuestEndpoint(std::shared_ptr<LoopbackInputTransport> loopback)
+    : loopback_(std::move(loopback)) {}
+
+bool LoopbackGuestEndpoint::connect() {
+    return loopback_ ? loopback_->connect() : false;
+}
+
+void LoopbackGuestEndpoint::disconnect() {
+    if (loopback_) {
+        loopback_->guest_disconnect();
+    }
+}
+
+bool LoopbackGuestEndpoint::is_connected() const noexcept {
+    return loopback_ ? loopback_->is_guest_connected() : false;
+}
+
+bool LoopbackGuestEndpoint::send_bytes(std::span<const std::byte> bytes) {
+    return loopback_ ? loopback_->guest_send_bytes(bytes) : false;
+}
+
+std::vector<std::byte> LoopbackGuestEndpoint::receive_bytes(std::size_t max_bytes) {
+    return loopback_ ? loopback_->guest_receive_bytes(max_bytes) : std::vector<std::byte>{};
+}
+
 } // namespace fang::studio

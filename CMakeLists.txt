@@ -113,11 +113,12 @@ add_executable(fang-studio WIN32
     apps/fang-studio/input_mapping_engine.cpp
     apps/fang-studio/input_ipc_protocol.cpp
     apps/fang-studio/input_transport.cpp
+    apps/fang-studio/socket_input_transport.cpp
     apps/fang-studio/fake_guest_input_endpoint.cpp
     apps/fang-studio/guest_input_bridge.cpp
 )
 target_link_libraries(fang-studio PRIVATE fang_core fang_runtime fang_runtime_supervisor_client
-    fang_warnings User32 Gdi32 d3d11 dxgi d3dcompiler)
+    fang_warnings User32 Gdi32 d3d11 dxgi d3dcompiler Ws2_32)
 target_compile_definitions(fang-studio PRIVATE UNICODE _UNICODE)
 
 add_executable(fang-runtime-broker
@@ -293,6 +294,7 @@ if(BUILD_TESTING)
         apps/fang-studio/input_mapping_engine.cpp
         apps/fang-studio/input_ipc_protocol.cpp
         apps/fang-studio/input_transport.cpp
+        apps/fang-studio/socket_input_transport.cpp
         apps/fang-studio/fake_guest_input_endpoint.cpp
         apps/fang-studio/guest_input_bridge.cpp
     )
@@ -301,7 +303,7 @@ if(BUILD_TESTING)
     )
     target_link_libraries(fang-studio-player-tests PRIVATE
         fang_core fang_runtime fang_runtime_supervisor_client
-        fang_warnings User32 Gdi32 d3d11 dxgi d3dcompiler
+        fang_warnings User32 Gdi32 d3d11 dxgi d3dcompiler Ws2_32
     )
     target_compile_definitions(fang-studio-player-tests PRIVATE UNICODE _UNICODE)
     add_test(NAME studio-player-unit COMMAND fang-studio-player-tests)
@@ -331,6 +333,54 @@ if(BUILD_TESTING)
     )
     target_compile_definitions(fang-studio-video-tests PRIVATE UNICODE _UNICODE)
     add_test(NAME studio-video-unit COMMAND fang-studio-video-tests)
+
+    add_library(fang_guest_daemon_core STATIC
+        apps/fang-input-daemon/guest_input_backend.cpp
+        apps/fang-input-daemon/guest_input_daemon.cpp
+        apps/fang-studio/input_ipc_protocol.cpp
+        apps/fang-studio/input_transport.cpp
+        apps/fang-studio/socket_input_transport.cpp
+    )
+    target_include_directories(fang_guest_daemon_core PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-input-daemon"
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-studio"
+    )
+    target_link_libraries(fang_guest_daemon_core PRIVATE fang_warnings Ws2_32)
+
+    add_executable(fang-input-daemon
+        apps/fang-input-daemon/main.cpp
+    )
+    target_link_libraries(fang-input-daemon PRIVATE
+        fang_guest_daemon_core fang_warnings Ws2_32
+    )
+
+    add_executable(fang-guest-daemon-tests
+        tests/unit/guest_daemon_tests.cpp
+        apps/fang-studio/fake_guest_input_endpoint.cpp
+        apps/fang-studio/guest_input_bridge.cpp
+    )
+    target_include_directories(fang-guest-daemon-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-input-daemon"
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-studio"
+    )
+    target_link_libraries(fang-guest-daemon-tests PRIVATE
+        fang_guest_daemon_core fang_warnings Ws2_32
+    )
+    add_test(NAME guest-daemon-unit COMMAND fang-guest-daemon-tests)
+
+    add_executable(fang-socket-transport-tests
+        tests/unit/socket_transport_tests.cpp
+        apps/fang-studio/fake_guest_input_endpoint.cpp
+        apps/fang-studio/guest_input_bridge.cpp
+    )
+    target_include_directories(fang-socket-transport-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-input-daemon"
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-studio"
+    )
+    target_link_libraries(fang-socket-transport-tests PRIVATE
+        fang_guest_daemon_core fang_warnings Ws2_32
+    )
+    add_test(NAME socket-transport-unit COMMAND fang-socket-transport-tests)
 
     find_program(FANG_POWERSHELL_EXECUTABLE NAMES powershell.exe pwsh.exe)
     if(FANG_POWERSHELL_EXECUTABLE)
