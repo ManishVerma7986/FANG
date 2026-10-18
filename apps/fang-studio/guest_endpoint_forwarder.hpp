@@ -258,6 +258,9 @@ private:
     static std::filesystem::path discover_adb_executable();
     TransportResult execute_adb_command(const std::vector<std::string>& args, std::chrono::milliseconds timeout, std::string* output = nullptr) const;
     bool verify_adb_available() const;
+    
+    // Constant-time string comparison to prevent timing attacks
+    static bool constant_time_equals(const std::string& a, const std::string& b) noexcept;
 };
 
 // Deterministic fake ADB transport for offline unit testing.
@@ -358,6 +361,11 @@ private:
     std::string handshake_error_code_ = "HANDSHAKE_FAILED";
     std::string handshake_diagnostic_ = "Fake handshake failed";
     
+    // Expected session/generation IDs for handshake validation
+    std::string expected_session_id_;
+    std::string expected_generation_id_;
+    bool has_expected_ids_ = false;
+
     void log_call(const std::string& op, const std::string& serial, const std::string& detail);
 };
 

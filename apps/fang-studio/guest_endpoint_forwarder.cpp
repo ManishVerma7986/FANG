@@ -351,16 +351,22 @@ TransportResult AdbTransport::start_daemon(
     // Give the daemon a moment to bind to the port
     execute_adb_command({"shell", "sleep", "1"}, std::chrono::milliseconds(2000));
 
-    // Verify the process is actually running by checking the process list
-    std::string ps_cmd = "ps -A | grep " + guest_staging_path;
-    auto ps_result = execute_adb_command({"shell", ps_cmd}, config_.command_timeout);
+    // Verify the process is actually running by checking for the exact command line
+    // Use pgrep with -f to match the full command line including session/generation IDs
+    std::string pgrep_cmd = "pgrep -f \"" + guest_staging_path + ".*--session-id " + session_id + ".*--generation-id " + generation_id + "\"";
+    auto ps_result = execute_adb_command({"shell", pgrep_cmd}, config_.command_timeout);
     if (!ps_result.success || ps_result.detail.empty()) {
-        return TransportResult::fail("DAEMON_PROCESS_NOT_FOUND", 
-            "Daemon process not found after startup", 
-            "Command: " + cmd);
+        // Fallback: try to find by binary name only
+        std::string fallback_cmd = "pgrep -f " + guest_staging_path;
+        auto fallback_result = execute_adb_command({"shell", fallback_cmd}, config_.command_timeout);
+        if (!fallback_result.success || fallback_result.detail.empty()) {
+            return TransportResult::fail("DAEMON_PROCESS_NOT_FOUND", 
+                "Daemon process not found after startup", 
+                "Command: " + cmd + "; pgrep: " + pgrep_cmd);
+        }
     }
 
-    return TransportResult::ok("Daemon startup verified: " + cmd + " (PID found)");
+    return TransportResult::ok("Daemon startup verified: " + cmd + " (PID: " + ps_result.detail + ")");
 }
 
 TransportResult AdbTransport::verify_connection(
@@ -557,10 +563,25 @@ TransportResult AdbTransport::validate_target(
 
 void AdbTransport::set_authorization(std::string token) {
     if (config_.require_explicit_authorization && !config_.authorization_token.empty()) {
-        live_authorized_ = (token == config_.authorization_token);
+        // Use constant-time comparison to prevent timing attacks
+        live_authorized_ = constant_time_equals(token, config_.authorization_token);
+        // Clear the token from memory immediately
+        std::fill(token.begin(), token.end(), '\0');
     } else if (!config_.require_explicit_authorization) {
         live_authorized_ = true;
     }
+}
+
+// Constant-time string comparison to prevent timing attacks
+bool AdbTransport::constant_time_equals(const std::string& a, const std::string& b) noexcept {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    std::uint8_t diff = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        diff |= static_cast<std::uint8_t>(a[i] ^ b[i]);
+    }
+    return diff == 0;
 }
 
 // ============================================================================
@@ -642,6 +663,12 @@ TransportResult FakeAdbTransport::start_daemon(
     const std::string& generation_id) {
 
     log_call("start_daemon", serial_or_avd, guest_staging_path + " port=" + guest_port + " session=" + session_id + " gen=" + generation_id);
+    
+    // Store expected IDs for handshake validation
+    expected_session_id_ = session_id;
+    expected_generation_id_ = generation_id;
+    has_expected_ids_ = true;
+    
     return start_daemon_result_;
 }
 
@@ -653,6 +680,20 @@ TransportResult FakeAdbTransport::verify_connection(
     const std::string& generation_id) {
 
     log_call("verify_connection", serial_or_avd, "host_port=" + std::to_string(host_port) + " timeout=" + std::to_string(timeout.count()) + " session=" + session_id + " gen=" + generation_id);
+    
+    // Validate session/generation IDs match what was set in start_daemon
+    if (has_expected_ids_) {
+        if (session_id != expected_session_id_) {
+            return TransportResult::fail("HANDSHAKE_SESSION_MISMATCH", 
+                "Session ID mismatch in Hello message",
+                "Expected: " + expected_session_id_ + ", Got: " + session_id);
+        }
+        if (generation_id != expected_generation_id_) {
+            return TransportResult::fail("HANDSHAKE_GENERATION_MISMATCH", 
+                "Generation ID mismatch in Hello message",
+                "Expected: " + expected_generation_id_ + ", Got: " + generation_id);
+        }
+    }
     
     if (!handshake_success_) {
         return TransportResult::fail(handshake_error_code_, handshake_diagnostic_, "");

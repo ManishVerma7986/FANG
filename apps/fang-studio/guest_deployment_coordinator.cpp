@@ -1590,17 +1590,17 @@ bool GuestDeploymentCoordinator::execute_deployment_plan_with_transport(
         }
     }
 
+    // Generate session and generation IDs once for this deployment
+    const std::string session_id = "session-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+    const std::string generation_id = "gen-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+
     // Step 6: StartDaemon
     if (plan.steps.size() > 5) {
         auto& step = plan.steps[5];
         step.status = DeploymentPlanStepStatus::InProgress;
         step.started_at = std::chrono::system_clock::now();
-
-        // Generate session and generation IDs for this deployment
-        const std::string session_id = "session-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
-        const std::string generation_id = "gen-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
 
         auto start_result = transport_->start_daemon(
             serial_or_avd,
@@ -1647,12 +1647,7 @@ bool GuestDeploymentCoordinator::execute_deployment_plan_with_transport(
             }
         }
 
-        // Use the same session and generation IDs
-        const std::string session_id = "session-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
-        const std::string generation_id = "gen-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
-
+        // Use the same session and generation IDs generated above
         auto conn_result = transport_->verify_connection(serial_or_avd, host_port, std::chrono::milliseconds(10000), session_id, generation_id);
         if (conn_result.success) {
             step.status = DeploymentPlanStepStatus::Completed;
@@ -1821,17 +1816,17 @@ bool GuestDeploymentCoordinator::execute_deployment_plan(
         }
     }
 
+    // Generate session and generation IDs once for this deployment
+    const std::string session_id = "session-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+    const std::string generation_id = "gen-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+
     // Step 6: StartDaemon
     if (plan.steps.size() > 5) {
         auto& step = plan.steps[5];
         step.status = DeploymentPlanStepStatus::InProgress;
         step.started_at = std::chrono::system_clock::now();
-
-        // Generate session and generation IDs for this deployment
-        const std::string session_id = "session-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
-        const std::string generation_id = "gen-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
 
         auto start_result = transport->start_daemon(
             serial_or_avd,
@@ -1877,12 +1872,7 @@ bool GuestDeploymentCoordinator::execute_deployment_plan(
             }
         }
 
-        // Use the same session and generation IDs
-        const std::string session_id = "session-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
-        const std::string generation_id = "gen-" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
-
+        // Use the same session and generation IDs generated above
         auto conn_result = transport->verify_connection(serial_or_avd, host_port, std::chrono::milliseconds(10000), session_id, generation_id);
         if (conn_result.success) {
             step.status = DeploymentPlanStepStatus::Completed;
