@@ -343,9 +343,9 @@ TransportResult AdbTransport::start_daemon(
         " --session-id " + session_id + 
         " --generation-id " + generation_id + 
         " --backend recording";
-    auto result = execute_adb_command({"shell", cmd + " &"}, config_.startup_timeout);
-    if (!result.success) {
-        return TransportResult::fail("DAEMON_START_FAILED", "Failed to start guest daemon", result.detail);
+    auto exec_result = execute_adb_command({"shell", cmd + " &"}, config_.startup_timeout);
+    if (!exec_result.success) {
+        return TransportResult::fail("DAEMON_START_FAILED", "Failed to start guest daemon", exec_result.detail);
     }
 
     // Give the daemon a moment to bind to the port
@@ -353,20 +353,24 @@ TransportResult AdbTransport::start_daemon(
 
     // Verify the process is actually running by checking for the exact command line
     // Use pgrep with -f to match the full command line including session/generation IDs
+    // NO FALLBACK to binary-name-only matching - that can match stale or other instances
     std::string pgrep_cmd = "pgrep -f \"" + guest_staging_path + ".*--session-id " + session_id + ".*--generation-id " + generation_id + "\"";
     auto ps_result = execute_adb_command({"shell", pgrep_cmd}, config_.command_timeout);
+    
     if (!ps_result.success || ps_result.detail.empty()) {
-        // Fallback: try to find by binary name only
-        std::string fallback_cmd = "pgrep -f " + guest_staging_path;
-        auto fallback_result = execute_adb_command({"shell", fallback_cmd}, config_.command_timeout);
-        if (!fallback_result.success || fallback_result.detail.empty()) {
-            return TransportResult::fail("DAEMON_PROCESS_NOT_FOUND", 
-                "Daemon process not found after startup", 
-                "Command: " + cmd + "; pgrep: " + pgrep_cmd);
-        }
+        // Process with matching session/generation IDs not found
+        // Do NOT fall back to binary-name-only matching - that would match stale or other instances
+        return TransportResult::fail("DAEMON_PROCESS_NOT_FOUND", 
+            "Daemon process with matching session/generation IDs not found after startup",
+            "Command: " + cmd + "; pgrep: " + pgrep_cmd);
     }
 
-    return TransportResult::ok("Daemon startup verified: " + cmd + " (PID: " + ps_result.detail + ")");
+    TransportResult result;
+    result.success = true;
+    result.lifecycle_state = TransportResult::LifecycleState::ProcessObserved;
+    result.diagnostic = "Daemon process observed: " + cmd + " (PID: " + ps_result.detail + ")";
+    result.detail = ps_result.detail;
+    return result;
 }
 
 TransportResult AdbTransport::verify_connection(
@@ -499,7 +503,9 @@ TransportResult AdbTransport::verify_connection(
 
     // Handshake successful - daemon is ready
     transport.disconnect();
-    return TransportResult::ok("Readiness handshake successful: Hello/HelloAck exchanged, session=" + hello_ack->session_id + ", generation=" + hello_ack->generation_id + ", max_contacts=" + std::to_string(hello_ack->max_contacts));
+    TransportResult result = TransportResult::ok("Readiness handshake successful: Hello/HelloAck exchanged, session=" + hello_ack->session_id + ", generation=" + hello_ack->generation_id + ", max_contacts=" + std::to_string(hello_ack->max_contacts));
+    result.lifecycle_state = TransportResult::LifecycleState::ProtocolReady;
+    return result;
 }
 
 TransportResult AdbTransport::validate_target(
@@ -669,7 +675,10 @@ TransportResult FakeAdbTransport::start_daemon(
     expected_generation_id_ = generation_id;
     has_expected_ids_ = true;
     
-    return start_daemon_result_;
+    // Set lifecycle state to ProcessObserved for fake transport
+    TransportResult result = start_daemon_result_;
+    result.lifecycle_state = TransportResult::LifecycleState::ProcessObserved;
+    return result;
 }
 
 TransportResult FakeAdbTransport::verify_connection(
@@ -699,7 +708,9 @@ TransportResult FakeAdbTransport::verify_connection(
         return TransportResult::fail(handshake_error_code_, handshake_diagnostic_, "");
     }
     
-    return verify_connection_result_;
+    TransportResult result = verify_connection_result_;
+    result.lifecycle_state = TransportResult::LifecycleState::ProtocolReady;
+    return result;
 }
 
 TransportResult FakeAdbTransport::validate_target(

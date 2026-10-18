@@ -79,6 +79,12 @@ struct TransportResult {
     std::string error_code;
     std::string diagnostic;
     std::string detail;
+    // Deployment lifecycle state
+    enum class LifecycleState {
+        LaunchRequested,
+        ProcessObserved,
+        ProtocolReady
+    } lifecycle_state{LifecycleState::LaunchRequested};
     
     static TransportResult ok(std::string diag = "") {
         TransportResult r; r.success = true; r.diagnostic = std::move(diag); return r;
