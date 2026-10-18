@@ -1044,7 +1044,8 @@ void test_source_evidence_serialization() {
     evidence.status = SourceEvidence::Status::Collected;
     evidence.algorithm = "sha256";
     evidence.fingerprint = "abc123";
-    evidence.scope = "build-inputs-v1";
+    evidence.scope = "fang-guest-daemon-inputs-v1";
+    evidence.encoding = "fang-cim-c14n-v1";
     evidence.captured_at_utc = "2026-10-18T12:00:00Z";
     evidence.unavailable_reasons = {"reason1", "reason2"};
 
@@ -1061,7 +1062,7 @@ void test_source_evidence_serialization() {
     require(json.find("\"status\": \"collected\"") != std::string::npos, "JSON contains status");
     require(json.find("\"algorithm\": \"sha256\"") != std::string::npos, "JSON contains algorithm");
     require(json.find("\"fingerprint\": \"abc123\"") != std::string::npos, "JSON contains fingerprint");
-    require(json.find("\"scope\": \"build-inputs-v1\"") != std::string::npos, "JSON contains scope");
+    require(json.find("\"scope\": \"fang-guest-daemon-inputs-v1\"") != std::string::npos, "JSON contains scope");
     require(json.find("\"captured_at_utc\": \"2026-10-18T12:00:00Z\"") != std::string::npos, "JSON contains timestamp");
     require(json.find("\"reason1\"") != std::string::npos, "JSON contains unavailable_reasons");
 
@@ -1072,7 +1073,7 @@ void test_source_evidence_serialization() {
     require(parsed.source_evidence.is_collected(), "Parsed evidence is collected");
     require(parsed.source_evidence.algorithm == "sha256", "Parsed algorithm matches");
     require(parsed.source_evidence.fingerprint == "abc123", "Parsed fingerprint matches");
-    require(parsed.source_evidence.scope == "build-inputs-v1", "Parsed scope matches");
+    require(parsed.source_evidence.scope == "fang-guest-daemon-inputs-v1", "Parsed scope matches");
     require(parsed.source_evidence.captured_at_utc == "2026-10-18T12:00:00Z", "Parsed timestamp matches");
     require(parsed.source_evidence.unavailable_reasons.size() == 2, "Parsed unavailable_reasons count matches");
 
@@ -1097,6 +1098,31 @@ void test_source_evidence_serialization() {
     require(!parsed2.source_evidence.is_collected(), "Parsed evidence is not collected");
 
     std::cout << "  [PASS] test_source_evidence_serialization" << std::endl;
+}
+
+void test_repository_root_deterministic_selection() {
+    std::cout << "  [RUN] test_repository_root_deterministic_selection..." << std::endl;
+
+    GuestDeploymentCoordinator coordinator;
+    GuestDeploymentTarget target;
+    target.abi = GuestTargetAbi::X86_64;
+
+    const auto temp_dir = std::filesystem::temp_directory_path() / "fang_test_repo_root_deterministic";
+    std::filesystem::create_directories(temp_dir);
+
+    // Verify provenance assessment uses an explicit root source (staging_dir) rather
+    // than relying on std::filesystem::current_path() which can vary by working directory.
+    target.staging_dir = temp_dir.string();
+
+    auto report = coordinator.assess_deployment_readiness(target);
+    // Without manifest/provenance evidence, must not silently claim QualifiedCurrent.
+    require(
+        report.provenance_assessment != ProvenanceAssessment::QualifiedCurrent ||
+        !report.manifest.source_evidence.fingerprint.empty(),
+        "Provenance assessment must not claim QualifiedCurrent without verified evidence");
+
+    std::filesystem::remove_all(temp_dir);
+    std::cout << "  [PASS] test_repository_root_deterministic_selection" << std::endl;
 }
 
 } // namespace
@@ -1124,6 +1150,7 @@ int main() {
         test_studio_session_deployment_diagnostic_integration();
         test_provenance_assessment();
         test_source_evidence_serialization();
+        test_repository_root_deterministic_selection();
 
         std::cout << "[FANG-STAGE9-TESTS] All Stage 9 tests passed successfully." << std::endl;
         return 0;

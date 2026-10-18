@@ -1,0 +1,304 @@
+{
+  "canonical_format": "fang-cim-c14n-v1",
+  "scope": "fang-guest-daemon-inputs-v1",
+  "magic_bytes": [70, 65, 78, 71, 67, 73, 77, 0, 1],
+  "test_vectors": [
+    {
+      "name": "empty_entry_set",
+      "description": "Empty entry set with only target and toolchain metadata",
+      "repo_root": "C:/test/repo",
+      "source_revision": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+      "abi": "x86_64",
+      "api_level": 26,
+      "configuration": "Release",
+      "target_triple": "x86_64-linux-android26",
+      "ndk_version": "r26.1.10909125",
+      "compile_args": [
+        "--target=x86_64-linux-android26",
+        "-std=c++20",
+        "-fPIE",
+        "-pie",
+        "-Wall",
+        "-Wextra",
+        "-D__ANDROID__",
+        "-I", "C:/test/repo/apps/fang-input-daemon",
+        "-I", "C:/test/repo/apps/fang-studio",
+        "-O2",
+        "-DNDEBUG"
+      ],
+      "entries": [],
+      "expected_fingerprint_sha256": "c73ade1e728b2f8e4dc6238a1bbfda5f4747e7cd9e9398d0fffa837d5da15946"
+    },
+    {
+      "name": "single_file_entry",
+      "description": "Single source file entry with all metadata",
+      "repo_root": "C:/test/repo",
+      "source_revision": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+      "abi": "x86_64",
+      "api_level": 26,
+      "configuration": "Release",
+      "target_triple": "x86_64-linux-android26",
+      "ndk_version": "r26.1.10909125",
+      "compile_args": [
+        "--target=x86_64-linux-android26",
+        "-std=c++20",
+        "-fPIE",
+        "-pie",
+        "-Wall",
+        "-Wextra",
+        "-D__ANDROID__",
+        "-I", "C:/test/repo/apps/fang-input-daemon",
+        "-I", "C:/test/repo/apps/fang-studio",
+        "-O2",
+        "-DNDEBUG"
+      ],
+      "entries": [
+        {
+          "path": "apps/fang-input-daemon/main.cpp",
+          "role": "source",
+          "kind": "file",
+          "size": 1234,
+          "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ],
+      "expected_fingerprint_sha256": "292c33a77d7bf10380ce26611308121dd520e03ba2b9a348512d1be2abbe2721"
+    },
+    {
+      "name": "multiple_entries_utf8_ordering",
+      "description": "Multiple entries requiring UTF-8 path byte ordering",
+      "repo_root": "C:/test/repo",
+      "source_revision": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+      "abi": "x86_64",
+      "api_level": 26,
+      "configuration": "Release",
+      "target_triple": "x86_64-linux-android26",
+      "ndk_version": "r26.1.10909125",
+      "compile_args": [
+        "--target=x86_64-linux-android26",
+        "-std=c++20",
+        "-fPIE",
+        "-pie",
+        "-Wall",
+        "-Wextra",
+        "-D__ANDROID__",
+        "-I", "C:/test/repo/apps/fang-input-daemon",
+        "-I", "C:/test/repo/apps/fang-studio",
+        "-O2",
+        "-DNDEBUG"
+      ],
+      "entries": [
+        {
+          "path": "apps/fang-input-daemon/main.cpp",
+          "role": "source",
+          "kind": "file",
+          "size": 100,
+          "content_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        {
+          "path": "apps/fang-input-daemon/guest_input_backend.cpp",
+          "role": "source",
+          "kind": "file",
+          "size": 200,
+          "content_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        {
+          "path": "apps/fang-studio/input_ipc_protocol.cpp",
+          "role": "source",
+          "kind": "file",
+          "size": 300,
+          "content_hash": "3333333333333333333333333333333333333333333333333333333333333333"
+        },
+        {
+          "path": "apps/fang-studio/input_transport.cpp",
+          "role": "source",
+          "kind": "file",
+          "size": 400,
+          "content_hash": "4444444444444444444444444444444444444444444444444444444444444444"
+        },
+        {
+          "path": "compile_args/arg_000",
+          "role": "compile-arg",
+          "kind": "virtual",
+          "size": 35,
+          "content_hash": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        {
+          "path": "compile_args/arg_001",
+          "role": "compile-arg",
+          "kind": "virtual",
+          "size": 11,
+          "content_hash": "6666666666666666666666666666666666666666666666666666666666666666"
+        },
+        {
+          "path": "git/revision",
+          "role": "git-revision",
+          "kind": "virtual",
+          "size": 40,
+          "content_hash": "7777777777777777777777777777777777777777777777777777777777777777"
+        },
+        {
+          "path": "target/abi",
+          "role": "target-config",
+          "kind": "virtual",
+          "size": 7,
+          "content_hash": "8888888888888888888888888888888888888888888888888888888888888888"
+        },
+        {
+          "path": "target/api_level",
+          "role": "target-config",
+          "kind": "virtual",
+          "size": 2,
+          "content_hash": "9999999999999999999999999999999999999999999999999999999999999999"
+        }
+      ],
+      "expected_fingerprint_sha256": "bf90663aa14732c34861e1e038ff5ad3fc04f9cf19ef61887585c9515ef5787e"
+    },
+    {
+      "name": "paths_with_spaces_and_unicode",
+      "description": "Entries with spaces and non-ASCII characters in paths",
+      "repo_root": "C:/test/repo",
+      "source_revision": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+      "abi": "arm64-v8a",
+      "api_level": 26,
+      "configuration": "Debug",
+      "target_triple": "aarch64-linux-android26",
+      "ndk_version": "r26.1.10909125",
+      "compile_args": [
+        "--target=aarch64-linux-android26",
+        "-std=c++20",
+        "-fPIE",
+        "-pie",
+        "-Wall",
+        "-Wextra",
+        "-D__ANDROID__",
+        "-I", "C:/test/repo/apps/fang-input-daemon",
+        "-I", "C:/test/repo/apps/fang-studio",
+        "-O0",
+        "-g",
+        "-DFANG_DEBUG"
+      ],
+      "entries": [
+        {
+          "path": "scripts/build guest daemon.ps1",
+          "role": "build-script",
+          "kind": "file",
+          "size": 500,
+          "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "path": "apps/fang-input-daemon/\u6587\u4ef6.hpp",
+          "role": "header",
+          "kind": "file",
+          "size": 250,
+          "content_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        {
+          "path": "target/configuration",
+          "role": "target-config",
+          "kind": "virtual",
+          "size": 5,
+          "content_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      ],
+      "expected_fingerprint_sha256": "2fca24a7009d69fb61c06c1307721f2e2472fc4ee4f31c9c7a26e18bade3ee64"
+    },
+    {
+      "name": "file_and_virtual_entries_mixed",
+      "description": "Mix of file and virtual entries with different argument counts",
+      "repo_root": "C:/test/repo",
+      "source_revision": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+      "abi": "x86",
+      "api_level": 26,
+      "configuration": "Release",
+      "target_triple": "i686-linux-android26",
+      "ndk_version": "r27.0.12345678",
+      "compile_args": [
+        "--target=i686-linux-android26",
+        "-std=c++20",
+        "-fPIE",
+        "-pie",
+        "-Wall",
+        "-Wextra",
+        "-D__ANDROID__",
+        "-I", "C:/test/repo/apps/fang-input-daemon",
+        "-I", "C:/test/repo/apps/fang-studio",
+        "-O2",
+        "-DNDEBUG",
+        "-march=i686",
+        "-mtune=generic"
+      ],
+      "entries": [
+        {
+          "path": "apps/fang-input-daemon/main.cpp",
+          "role": "source",
+          "kind": "file",
+          "size": 1500,
+          "content_hash": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        },
+        {
+          "path": "CMakeLists.txt",
+          "role": "configuration",
+          "kind": "file",
+          "size": 800,
+          "content_hash": "beefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdead"
+        },
+        {
+          "path": "compile_args/arg_000",
+          "role": "compile-arg",
+          "kind": "virtual",
+          "size": 27,
+          "content_hash": "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe"
+        },
+        {
+          "path": "compile_args/arg_001",
+          "role": "compile-arg",
+          "kind": "virtual",
+          "size": 11,
+          "content_hash": "feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
+        },
+        {
+          "path": "compile_args/arg_010",
+          "role": "compile-arg",
+          "kind": "virtual",
+          "size": 13,
+          "content_hash": "abcdef01abcdef01abcdef01abcdef01abcdef01abcdef01abcdef01abcdef01"
+        },
+        {
+          "path": "compile_args/arg_011",
+          "role": "compile-arg",
+          "kind": "virtual",
+          "size": 14,
+          "content_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        },
+        {
+          "path": "target/abi",
+          "role": "target-config",
+          "kind": "virtual",
+          "size": 3,
+          "content_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        {
+          "path": "target/compiler_target",
+          "role": "target-config",
+          "kind": "virtual",
+          "size": 23,
+          "content_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      ],
+      "expected_fingerprint_sha256": "1a80a410037c7e2dd92b54bfa19ab537fa13b5f42c6ad2db296bbdeb3afdc910"
+    }
+  ],
+  "role_ids": {
+    "source": 1,
+    "header": 2,
+    "build-script": 3,
+    "configuration": 4,
+    "target-config": 5,
+    "compile-arg": 6,
+    "git-revision": 7
+  },
+  "kind_ids": {
+    "file": 0,
+    "virtual": 1
+  }
+}

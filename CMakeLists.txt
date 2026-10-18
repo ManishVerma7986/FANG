@@ -354,6 +354,14 @@ if(BUILD_TESTING)
         apps/fang-studio/input_transport.cpp
         apps/fang-studio/socket_input_transport.cpp
     )
+
+    add_library(fang_canonical_encoder STATIC
+        apps/fang-studio/canonical_encoder.cpp
+    )
+    target_include_directories(fang_canonical_encoder PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-studio"
+    )
+    target_link_libraries(fang_canonical_encoder PRIVATE fang_warnings)
     target_include_directories(fang_guest_daemon_core PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-input-daemon"
         "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-studio"
@@ -413,6 +421,21 @@ if(BUILD_TESTING)
         apps/fang-studio/guest_input_bridge.cpp
         apps/fang-studio/guest_endpoint_forwarder.cpp
         apps/fang-studio/guest_deployment_coordinator.cpp
+    )
+
+    add_executable(fang-canonical-encoder-tests
+        tests/unit/canonical_encoder_tests.cpp
+    )
+    target_link_libraries(fang-canonical-encoder-tests PRIVATE
+        fang_canonical_encoder fang_warnings
+    )
+    add_test(NAME canonical-encoder-unit COMMAND fang-canonical-encoder-tests)
+
+    add_executable(test-sha256
+        tests/unit/test_sha256.cpp
+    )
+    target_link_libraries(test-sha256 PRIVATE
+        fang_canonical_encoder fang_warnings
     )
     target_include_directories(fang-stage9-runtime-tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-studio"

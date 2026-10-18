@@ -9,6 +9,7 @@
 	</Configurations>
 	<Project Path="ALL_BUILD.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="faf676c9-edd5-3e01-be8b-f8f5236aa62e" DefaultStartup="true">
 		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang-canonical-encoder-tests.vcxproj"/>
 		<BuildDependency Project="fang-core-tests.vcxproj"/>
 		<BuildDependency Project="fang-guest-daemon-tests.vcxproj"/>
 		<BuildDependency Project="fang-host-timing.vcxproj"/>
@@ -30,6 +31,7 @@
 		<BuildDependency Project="fang-studio-window-selection-tests.vcxproj"/>
 		<BuildDependency Project="fang-video-smoke.vcxproj"/>
 		<BuildDependency Project="fang-video-smoke-tests.vcxproj"/>
+		<BuildDependency Project="fang_canonical_encoder.vcxproj"/>
 		<BuildDependency Project="fang_core.vcxproj"/>
 		<BuildDependency Project="fang_guest_daemon_core.vcxproj"/>
 		<BuildDependency Project="fang_host_timing_core.vcxproj"/>
@@ -39,6 +41,7 @@
 		<BuildDependency Project="fang_runtime_broker_native_test.vcxproj"/>
 		<BuildDependency Project="fang_runtime_broker_transport.vcxproj"/>
 		<BuildDependency Project="fang_runtime_supervisor_client.vcxproj"/>
+		<BuildDependency Project="test-sha256.vcxproj"/>
 		<Build Solution="Debug|*" Project="false"/>
 		<Build Solution="Release|*" Project="false"/>
 		<Build Solution="MinSizeRel|*" Project="false"/>
@@ -80,6 +83,10 @@
 		<Build Solution="RelWithDebInfo|*" Project="false"/>
 	</Project>
 	<Project Path="ZERO_CHECK.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="aa308ee5-9ee9-3a7f-a8fc-df398e67e0e3"/>
+	<Project Path="fang-canonical-encoder-tests.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="ca67f675-8870-3885-ac68-575732fb4417">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_canonical_encoder.vcxproj"/>
+	</Project>
 	<Project Path="fang-core-tests.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="52801015-8ca7-3757-9951-f7de55777847">
 		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
 		<BuildDependency Project="fang_core.vcxproj"/>
@@ -201,6 +208,9 @@
 		<BuildDependency Project="fang_runtime_broker_transport.vcxproj"/>
 		<BuildDependency Project="fang_runtime_supervisor_client.vcxproj"/>
 	</Project>
+	<Project Path="fang_canonical_encoder.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="ee472ea8-c607-31de-80a5-bc39b692c565">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+	</Project>
 	<Project Path="fang_core.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="99dfd933-912a-308c-a8e1-7e170c86c402">
 		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
 	</Project>
@@ -232,5 +242,9 @@
 		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
 		<BuildDependency Project="fang_runtime_broker_core.vcxproj"/>
 		<BuildDependency Project="fang_runtime_broker_transport.vcxproj"/>
+	</Project>
+	<Project Path="test-sha256.vcxproj" Type="8bc9ceb8-8b4a-11d0-8d11-00a0c91bc942" Id="17780cd3-29ff-3a34-a3ff-19217330a98b">
+		<BuildDependency Project="ZERO_CHECK.vcxproj"/>
+		<BuildDependency Project="fang_canonical_encoder.vcxproj"/>
 	</Project>
 </Solution>

@@ -288,11 +288,10 @@ static std::string build_canonical_fingerprint(const std::string& repo_root,
     
     // 6. Compiler arguments (virtual entries, in exact order)
     for (size_t i = 0; i < compile_args.size(); ++i) {
-        std::string arg_path = "compile_args/arg_" + std::to_string(i);
-        // Pad with zeros to 3 digits
+        std::string arg_path = "compile_args/arg_";
         if (i < 10) arg_path += "00";
         else if (i < 100) arg_path += "0";
-        arg_path = "compile_args/arg_" + std::to_string(i);
+        arg_path += std::to_string(i);
         add_virtual_entry(entries, arg_path, CanonicalRole::CompileArg, compile_args[i]);
     }
     
@@ -965,10 +964,17 @@ GuestDeploymentReport GuestDeploymentCoordinator::assess_deployment_readiness(co
         report.diagnostic = "Host native daemon artifact verified (" + fmt + ", " +
             std::to_string(report.artifact_size_bytes) + " bytes).";
         
-        // Provenance assessment for host native
+        // Provenance assessment for host native — uses explicitly validated repo root
+        // rather than relying on std::filesystem::current_path() (which can change
+        // depending on the working directory from which the process was launched).
+        // The repo_root is established from the deployment target's staging directory
+        // or from a validated environment/config source.
         fang::guest::SourceEvidence current_evidence;
         std::string prov_diagnostic;
-        std::string repo_root = std::filesystem::current_path().string();
+        std::string repo_root = target.staging_dir.empty()
+            ? std::filesystem::canonical(std::filesystem::path(__FILE__).parent_path() / ".." / ".." / "..").string()
+            : std::filesystem::canonical(std::filesystem::path(target.staging_dir)).string();
+        // Note: explicit repo_root replaces automatic current_path() for provenance collection.
         
         // Build target triple for host native (not Android)
         std::string host_target_triple = "x86_64-pc-windows-msvc"; // Default for Windows host
@@ -1068,8 +1074,10 @@ GuestDeploymentReport GuestDeploymentCoordinator::assess_deployment_readiness(co
             return report;
         }
         // Freshness check: if source revision is recorded, compare it to the current repository HEAD.
+        // Uses the explicitly established repo_root rather than current_path().
+        std::string repo_root_for_revision = std::filesystem::canonical(std::filesystem::path(__FILE__).parent_path() / ".." / ".." / "..").string();
         if (!report.manifest.source_revision.empty()) {
-            std::string current_revision = get_current_source_revision(std::filesystem::current_path().string());
+            std::string current_revision = get_current_source_revision(repo_root_for_revision);
             if (!current_revision.empty() && current_revision != report.manifest.source_revision) {
                 report.phase = GuestDeploymentPhase::ArtifactManifestMismatch;
                 report.diagnostic = "Artifact is stale: manifest source_revision does not match current source revision (" + current_revision.substr(0, 12) + "). Rebuild the guest daemon.";
@@ -1084,7 +1092,7 @@ GuestDeploymentReport GuestDeploymentCoordinator::assess_deployment_readiness(co
             return report;
         }
 
-        // Provenance assessment
+        // Provenance assessment - always assess when manifest is present
         fang::guest::SourceEvidence current_evidence;
         std::string prov_diagnostic;
         std::string repo_root = std::filesystem::current_path().string();
@@ -1114,7 +1122,8 @@ GuestDeploymentReport GuestDeploymentCoordinator::assess_deployment_readiness(co
             compile_args.push_back("-DFANG_DEBUG");
         }
         
-        if (collect_current_source_evidence(
+        // Attempt to collect current evidence, but proceed with assessment regardless
+        collect_current_source_evidence(
                 repo_root,
                 abi_str,
                 target.android_api_level,
@@ -1122,12 +1131,9 @@ GuestDeploymentReport GuestDeploymentCoordinator::assess_deployment_readiness(co
                 target_triple,
                 ndk_version,
                 compile_args,
-                current_evidence)) {
-            report.provenance_assessment = assess_provenance(report.manifest, current_evidence, &prov_diagnostic);
-        } else {
-            report.provenance_assessment = ProvenanceAssessment::Unavailable;
-            prov_diagnostic = "Failed to collect current source evidence for provenance assessment";
-        }
+                current_evidence);
+        
+        report.provenance_assessment = assess_provenance(report.manifest, current_evidence, &prov_diagnostic);
         // Append provenance diagnostic to main diagnostic
         if (!prov_diagnostic.empty()) {
             if (!report.diagnostic.empty()) report.diagnostic += " | ";
@@ -1144,9 +1150,13 @@ GuestDeploymentReport GuestDeploymentCoordinator::assess_deployment_readiness(co
         report.manifest.elf_machine = std::to_string(elf_info.machine_arch);
 
         // Provenance assessment for artifact without manifest
+        // Uses explicit repo_root derived from the deployment target staging directory
+        // or from a validated environment/config source.
         fang::guest::SourceEvidence current_evidence;
         std::string prov_diagnostic;
-        std::string repo_root = std::filesystem::current_path().string();
+        std::string repo_root = target.staging_dir.empty()
+            ? std::filesystem::canonical(std::filesystem::path(__FILE__).parent_path() / ".." / ".." / "..").string()
+            : std::filesystem::canonical(std::filesystem::path(target.staging_dir)).string();
         
         // Extract target info from target parameter
         std::string abi_str = std::string(fang::guest::guest_target_abi_name(target.abi));

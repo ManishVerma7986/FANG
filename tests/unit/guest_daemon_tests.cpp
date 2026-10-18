@@ -181,7 +181,8 @@ void test_daemon_truncated_oversized_malformed_packets() {
     auto transport = std::make_shared<LoopbackInputTransport>();
     auto guest_endpoint = std::make_shared<LoopbackGuestEndpoint>(transport);
     auto backend = std::make_shared<RecordingGuestInputBackend>();
-    GuestInputDaemon daemon(guest_endpoint, backend);
+    GuestInputDaemon::Config cfg;
+    GuestInputDaemon daemon(guest_endpoint, backend, cfg);
     daemon.start();
 
     // Oversized payload header (> 4096 bytes)
@@ -222,7 +223,8 @@ void test_daemon_invalid_message_types_and_coordinates() {
     auto transport = std::make_shared<LoopbackInputTransport>();
     auto guest_endpoint = std::make_shared<LoopbackGuestEndpoint>(transport);
     auto backend = std::make_shared<RecordingGuestInputBackend>();
-    GuestInputDaemon daemon(guest_endpoint, backend);
+    GuestInputDaemon::Config cfg;
+    GuestInputDaemon daemon(guest_endpoint, backend, cfg);
     daemon.start();
 
     // Handshake first
@@ -265,7 +267,8 @@ void test_daemon_sequence_numbers_duplicates_gaps() {
     auto transport = std::make_shared<LoopbackInputTransport>();
     auto guest_endpoint = std::make_shared<LoopbackGuestEndpoint>(transport);
     auto backend = std::make_shared<RecordingGuestInputBackend>();
-    GuestInputDaemon daemon(guest_endpoint, backend);
+    GuestInputDaemon::Config cfg;
+    GuestInputDaemon daemon(guest_endpoint, backend, cfg);
     daemon.start();
 
     // Handshake
@@ -304,7 +307,8 @@ void test_daemon_multi_touch_transitions_and_active_tracking() {
     auto transport = std::make_shared<LoopbackInputTransport>();
     auto guest_endpoint = std::make_shared<LoopbackGuestEndpoint>(transport);
     auto backend = std::make_shared<RecordingGuestInputBackend>();
-    GuestInputDaemon daemon(guest_endpoint, backend);
+    GuestInputDaemon::Config cfg;
+    GuestInputDaemon daemon(guest_endpoint, backend, cfg);
     daemon.start();
 
     HelloPayload hello{input_protocol_version, 1080, 1920, "default_session", "gen-1"};
@@ -345,7 +349,8 @@ void test_daemon_key_events_and_explicit_release() {
     auto transport = std::make_shared<LoopbackInputTransport>();
     auto guest_endpoint = std::make_shared<LoopbackGuestEndpoint>(transport);
     auto backend = std::make_shared<RecordingGuestInputBackend>();
-    GuestInputDaemon daemon(guest_endpoint, backend);
+    GuestInputDaemon::Config cfg;
+    GuestInputDaemon daemon(guest_endpoint, backend, cfg);
     daemon.start();
 
     HelloPayload hello{input_protocol_version, 1080, 1920, "default_session", "gen-1"};
@@ -380,7 +385,8 @@ void test_daemon_cancel_all_held_contacts_and_keys() {
     auto transport = std::make_shared<LoopbackInputTransport>();
     auto guest_endpoint = std::make_shared<LoopbackGuestEndpoint>(transport);
     auto backend = std::make_shared<RecordingGuestInputBackend>();
-    GuestInputDaemon daemon(guest_endpoint, backend);
+    GuestInputDaemon::Config cfg;
+    GuestInputDaemon daemon(guest_endpoint, backend, cfg);
     daemon.start();
 
     HelloPayload hello{input_protocol_version, 1080, 1920, "default_session", "gen-1"};
@@ -449,7 +455,8 @@ void test_daemon_backend_failure_handling() {
     auto transport = std::make_shared<LoopbackInputTransport>();
     auto guest_endpoint = std::make_shared<LoopbackGuestEndpoint>(transport);
     auto backend = std::make_shared<RecordingGuestInputBackend>();
-    GuestInputDaemon daemon(guest_endpoint, backend);
+    GuestInputDaemon::Config cfg;
+    GuestInputDaemon daemon(guest_endpoint, backend, cfg);
     daemon.start();
 
     HelloPayload hello{input_protocol_version, 1080, 1920, "default_session", "gen-1"};

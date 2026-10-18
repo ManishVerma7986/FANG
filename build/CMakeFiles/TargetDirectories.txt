@@ -28,10 +28,13 @@ A:/PYTHON PROJECT/Fang root folder/Fang/build/CMakeFiles/fang-studio-window-sele
 A:/PYTHON PROJECT/Fang root folder/Fang/build/CMakeFiles/fang-studio-player-tests.dir
 A:/PYTHON PROJECT/Fang root folder/Fang/build/CMakeFiles/fang-studio-video-tests.dir
 A:/PYTHON PROJECT/Fang root folder/Fang/build/CMakeFiles/fang_guest_daemon_core.dir
+A:/PYTHON PROJECT/Fang root folder/Fang/build/CMakeFiles/fang_canonical_encoder.dir
 A:/PYTHON PROJECT/Fang root folder/Fang/build/CMakeFiles/fang-input-daemon.dir
 A:/PYTHON PROJECT/Fang root folder/Fang/build/CMakeFiles/fang-guest-daemon-tests.dir
 A:/PYTHON PROJECT/Fang root folder/Fang/build/CMakeFiles/fang-socket-transport-tests.dir
 A:/PYTHON PROJECT/Fang root folder/Fang/build/CMakeFiles/fang-stage9-runtime-tests.dir
+A:/PYTHON PROJECT/Fang root folder/Fang/build/CMakeFiles/fang-canonical-encoder-tests.dir
+A:/PYTHON PROJECT/Fang root folder/Fang/build/CMakeFiles/test-sha256.dir
 A:/PYTHON PROJECT/Fang root folder/Fang/build/CMakeFiles/RUN_TESTS.dir
 A:/PYTHON PROJECT/Fang root folder/Fang/build/CMakeFiles/ALL_BUILD.dir
 A:/PYTHON PROJECT/Fang root folder/Fang/build/CMakeFiles/ZERO_CHECK.dir

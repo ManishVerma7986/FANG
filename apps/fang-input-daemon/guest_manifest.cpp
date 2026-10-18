@@ -220,26 +220,28 @@ bool GuestArtifactManifest::from_json(
         } else {
             out_manifest.source_evidence.status = SourceEvidence::Status::Unavailable;
         }
-        // Parse unavailable_reasons array
-        out_manifest.source_evidence.unavailable_reasons.clear();
-        std::string needle = "\"unavailable_reasons\":";
-        auto pos = source_evidence_json.find(needle);
-        if (pos != std::string_view::npos) {
-            auto bracket_start = source_evidence_json.find('[', pos);
-            auto bracket_end = source_evidence_json.find(']', bracket_start);
-            if (bracket_start != std::string_view::npos && bracket_end != std::string_view::npos) {
-                std::string_view arr = source_evidence_json.substr(bracket_start + 1, bracket_end - bracket_start - 1);
-                size_t idx = 0;
-                while (idx < arr.size()) {
-                    auto q1 = arr.find('\"', idx);
-                    if (q1 == std::string_view::npos) break;
-                    auto q2 = arr.find('\"', q1 + 1);
-                    if (q2 == std::string_view::npos) break;
-                    out_manifest.source_evidence.unavailable_reasons.push_back(std::string(arr.substr(q1 + 1, q2 - q1 - 1)));
-                    idx = q2 + 1;
-                }
+// Parse unavailable_reasons array
+    out_manifest.source_evidence.unavailable_reasons.clear();
+    std::string needle = "\"unavailable_reasons\":";
+    auto pos = source_evidence_json.find(needle);
+    if (pos != std::string_view::npos) {
+        auto bracket_start = source_evidence_json.find('[', pos);
+        auto bracket_end = source_evidence_json.find(']', bracket_start);
+        if (bracket_start != std::string_view::npos && bracket_end != std::string_view::npos) {
+            // Copy the array content to avoid any string_view lifetime issues
+            std::string arr_copy = std::string(source_evidence_json.substr(bracket_start + 1, bracket_end - bracket_start - 1));
+            size_t idx = 0;
+            while (idx < arr_copy.size()) {
+                auto q1 = arr_copy.find('\"', idx);
+                if (q1 == std::string::npos) break;
+                auto q2 = arr_copy.find('\"', q1 + 1);
+                if (q2 == std::string::npos) break;
+                std::string reason = arr_copy.substr(q1 + 1, q2 - q1 - 1);
+                out_manifest.source_evidence.unavailable_reasons.push_back(reason);
+                idx = q2 + 1;
             }
         }
+    }
     }
 
     auto parse_string_array = [&](std::string_view key, std::vector<std::string>& out) {
