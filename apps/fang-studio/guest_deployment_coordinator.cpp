@@ -698,7 +698,8 @@ bool GuestDeploymentCoordinator::validate_artifact_manifest(
     fang::guest::GuestTargetAbi expected_abi,
     fang::guest::GuestArtifactManifest& out_manifest,
     std::string* error,
-    uint32_t expected_api_level) {
+    uint32_t expected_api_level,
+    bool check_abi_match) {
     std::ifstream mf(manifest_path);
     if (!mf) {
         if (error) *error = "Failed to open companion manifest: " + manifest_path;
@@ -715,11 +716,14 @@ bool GuestDeploymentCoordinator::validate_artifact_manifest(
         return false;
     }
 
-    const std::string expected_abi_str = std::string(fang::guest::guest_target_abi_name(expected_abi));
-    if (out_manifest.target_abi != expected_abi_str) {
-        if (error) *error = "Manifest target ABI mismatch: manifest specifies '" + out_manifest.target_abi +
-            "', expected '" + expected_abi_str + "'";
-        return false;
+    // Only check ABI match if explicitly requested (default true for backward compatibility in deployment)
+    if (check_abi_match) {
+        const std::string expected_abi_str = std::string(fang::guest::guest_target_abi_name(expected_abi));
+        if (out_manifest.target_abi != expected_abi_str) {
+            if (error) *error = "Manifest target ABI mismatch: manifest specifies '" + out_manifest.target_abi +
+                "', expected '" + expected_abi_str + "'";
+            return false;
+        }
     }
 
     if (!out_manifest.artifact_sha256.empty()) {
@@ -1125,7 +1129,7 @@ GuestDeploymentReport GuestDeploymentCoordinator::assess_deployment_readiness(co
 
     if (!manifest_to_validate.empty()) {
         std::string manifest_err;
-        if (!validate_artifact_manifest(manifest_to_validate.string(), resolved_path.string(), target.abi, report.manifest, &manifest_err, target.android_api_level)) {
+        if (!validate_artifact_manifest(manifest_to_validate.string(), resolved_path.string(), target.abi, report.manifest, &manifest_err, target.android_api_level, true)) {
             report.phase = GuestDeploymentPhase::ArtifactManifestMismatch;
             report.diagnostic = "Companion manifest validation failed: " + manifest_err;
             return report;
@@ -1951,7 +1955,8 @@ GuestDeploymentCoordinator::PreflightResult GuestDeploymentCoordinator::run_offl
             if (std::filesystem::exists(manifest_path)) {
                 fang::guest::GuestArtifactManifest manifest;
                 std::string error;
-                if (validate_artifact_manifest(manifest_path, artifact_path, target.abi, manifest, &error)) {
+                // Artifact Integrity check: don't check ABI match here, that's check #2
+                if (validate_artifact_manifest(manifest_path, artifact_path, target.abi, manifest, &error, 0, false)) {
                     // Verify artifact size and SHA-256 match manifest
                     uint64_t actual_size = std::filesystem::file_size(artifact_path);
                     std::string actual_sha256 = calculate_file_sha256(artifact_path);
@@ -1988,7 +1993,8 @@ GuestDeploymentCoordinator::PreflightResult GuestDeploymentCoordinator::run_offl
             if (std::filesystem::exists(manifest_path)) {
                 fang::guest::GuestArtifactManifest manifest;
                 std::string error;
-                if (validate_artifact_manifest(manifest_path, artifact_path, target.abi, manifest, nullptr)) {
+                // ABI Match check: don't let validate_artifact_manifest fail on ABI mismatch
+                if (validate_artifact_manifest(manifest_path, artifact_path, target.abi, manifest, nullptr, 0, false)) {
                     if (manifest.target_abi == get_abi_string(target.abi)) {
                         passed = true;
                         error_code = "";
@@ -2014,7 +2020,8 @@ GuestDeploymentCoordinator::PreflightResult GuestDeploymentCoordinator::run_offl
         if (std::filesystem::exists(manifest_path)) {
             fang::guest::GuestArtifactManifest manifest;
             std::string error;
-            if (validate_artifact_manifest(manifest_path, artifact_path, target.abi, manifest, nullptr)) {
+            // Provenance check: don't check ABI match here
+            if (validate_artifact_manifest(manifest_path, artifact_path, target.abi, manifest, nullptr, 0, false)) {
                 fang::guest::SourceEvidence current_evidence;
                 // We don't actually collect current evidence in offline preflight,
                 // just check what's in the manifest

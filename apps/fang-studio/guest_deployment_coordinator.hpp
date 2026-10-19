@@ -255,7 +255,8 @@ public:
         fang::guest::GuestTargetAbi expected_abi,
         fang::guest::GuestArtifactManifest& out_manifest,
         std::string* error = nullptr,
-        uint32_t expected_api_level = 26);
+        uint32_t expected_api_level = 26,
+        bool check_abi_match = true);
     static std::string calculate_file_sha256(const std::string& file_path);
 
     // Provenance helpers

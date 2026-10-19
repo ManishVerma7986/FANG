@@ -3259,6 +3259,86 @@ std::filesystem::remove_all(temp_dir);
     std::cout << "  [PASS] test_preflight_abi_match_pass" << std::endl;
 }
 
+void test_preflight_abi_match_fail() {
+    std::cout << "  [RUN] test_preflight_abi_match_fail..." << std::endl;
+
+    using namespace fang::studio;
+    
+    GuestDeploymentCoordinator coordinator;
+    const auto temp_dir = std::filesystem::temp_directory_path() / "fang_test_preflight_abi_fail";
+    std::filesystem::create_directories(temp_dir);
+
+    // Create artifact with name matching target ABI (x86_64) but manifest declares arm64-v8a
+    const auto elf_file = temp_dir / "fang-input-daemon-android-x86_64";
+    write_synthetic_elf64(elf_file, 0x3E, 2, 1, 3, 1);
+
+    // Target ABI is x86_64, but manifest declares arm64-v8a (mismatch)
+    GuestDeploymentTarget target;
+    target.abi = fang::guest::GuestTargetAbi::X86_64;
+    target.staging_dir = temp_dir.string();
+
+    // Create manifest that declares arm64-v8a (mismatch with target.abi which is x86_64)
+    // But ELF metadata matches the actual artifact (x86_64) so Artifact Integrity passes
+    GuestArtifactManifest mf;
+    mf.artifact_name = "fang-input-daemon-android-x86_64";
+    mf.artifact_format = "ELF";
+    mf.target_os = "android";
+    mf.target_abi = "arm64-v8a";  // MISMATCH with target.abi (x86_64)
+    mf.is_android_elf_binary = true;
+    mf.is_cross_compiled = true;
+    mf.build_configuration = "Release";
+    mf.manifest_schema_version = "stage9-v3";
+    mf.build_result = "Success";
+    mf.artifact_sha256 = coordinator.calculate_file_sha256(elf_file.string());
+    mf.artifact_size_bytes = std::filesystem::file_size(elf_file);
+    mf.ndk_version = "r26.1.10909125";
+    mf.android_api_level = 26;
+    mf.elf_machine = "62";  // Matches actual artifact (x86_64)
+    mf.elf_class = 2;
+    mf.elf_data = 1;
+    mf.toolchain_status = ToolchainStatus::ToolchainAvailable;
+    mf.source_evidence.status = SourceEvidence::Status::Collected;
+    mf.source_evidence.algorithm = "sha256";
+    mf.source_evidence.fingerprint = "abc123";
+    mf.source_evidence.scope = "fang-guest-daemon-inputs-v1";
+    mf.source_evidence.encoding = "fang-cim-c14n-v1";
+    mf.source_evidence.captured_at_utc = "2026-10-18T12:00:00Z";
+    mf.source_tree_state = "clean";
+
+    const auto manifest_file = temp_dir / "guest_manifest.json";
+    std::ofstream out(manifest_file);
+    out << mf.to_json();
+    out.close();
+
+    auto result = GuestDeploymentCoordinator::run_offline_preflight(target, temp_dir.string(), "test-token", "emulator-5554");
+    
+    require(!result.all_passed, "Preflight fails with ABI mismatch");
+    require(result.overall_error_code == "ABI_MISMATCH", "Overall error code is ABI_MISMATCH");
+    
+    bool found = false;
+    for (const auto& check : result.checks) {
+        if (check.name == "ABI Match") {
+            found = true;
+            require(!check.passed, "ABI Match check fails");
+            require(check.error_code == "ABI_MISMATCH", "Error code is ABI_MISMATCH");
+        }
+    }
+    require(found, "ABI Match check exists");
+
+    // Also verify Artifact Integrity passes (since artifact exists and manifest is valid except ABI)
+    found = false;
+    for (const auto& check : result.checks) {
+        if (check.name == "Artifact Integrity") {
+            found = true;
+            require(check.passed, "Artifact Integrity passes - ABI mismatch is separate check");
+        }
+    }
+    require(found, "Artifact Integrity check exists");
+
+std::filesystem::remove_all(temp_dir);
+    std::cout << "  [PASS] test_preflight_abi_match_fail" << std::endl;
+}
+
 void test_preflight_provenance_eligible() {
     std::cout << "  [RUN] test_preflight_provenance_eligible..." << std::endl;
 
@@ -3789,6 +3869,7 @@ int main() {
         test_preflight_artifact_integrity_fail_missing();
         test_preflight_artifact_integrity_fail_sha256_mismatch();
         test_preflight_abi_match_pass();
+        test_preflight_abi_match_fail();
         test_preflight_provenance_eligible();
         test_preflight_provenance_ineligible();
         test_preflight_daemon_args_valid();
