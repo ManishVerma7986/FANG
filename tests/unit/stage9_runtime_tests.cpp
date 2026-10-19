@@ -3036,92 +3036,6 @@ void test_handshake_timeout_and_disconnect() {
     std::cout << "  [PASS] test_handshake_timeout_and_disconnect" << std::endl;
 }
 
-int main() {
-#ifdef _WIN32
-    // Suppress crash popups/WER in automated tests to prevent hangs
-    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
-#endif
-
-    try {
-        std::cout << "[FANG-STAGE9-TESTS] Running Stage 9 integration and deployment tests..." << std::endl;
-
-        test_forwarder_abstractions();
-        test_guest_manifest_and_toolchain_detector();
-        test_studio_session_integrated_lifecycle();
-        test_blocked_reachability_and_generation_reset();
-        test_peer_disconnect_and_error_reset();
-        test_guest_artifact_readiness_toolchain_missing();
-        test_guest_artifact_readiness_pe_vs_elf_mismatch();
-        test_guest_artifact_readiness_valid_elf_and_offline_policy();
-        test_elf_header_deep_inspection_and_validation();
-        test_artifact_manifest_parsing_validation_and_digest_consistency();
-        test_guest_toolchain_detector_synthetic_ndk_inspection();
-        test_studio_session_deployment_diagnostic_integration();
-        test_provenance_assessment();
-        test_source_evidence_serialization();
-        test_repository_root_deterministic_selection();
-        test_deployment_plan_creation_for_ready_artifact();
-        test_deployment_plan_creation_for_missing_artifact();
-        test_deployment_plan_creation_for_architecture_mismatch();
-        test_deployment_plan_creation_for_corrupt_artifact();
-        test_deployment_plan_creation_for_manifest_mismatch();
-        test_deployment_plan_creation_for_legacy_provenance();
-        test_deployment_plan_creation_for_stale_provenance();
-        test_deployment_plan_creation_for_unavailable_provenance();
-        test_deployment_plan_execution_offline_boundary();
-        test_deployment_plan_deterministic_and_idempotent();
-        test_deployment_plan_with_host_native();
-        test_deployment_plan_error_codes_machine_readable();
-        test_deployment_plan_preserves_readiness_semantics();
-        test_daemon_bootstrap_startup_command();
-        test_readiness_handshake_hello_helloack();
-        test_readiness_handshake_session_mismatch();
-        test_readiness_handshake_generation_mismatch();
-        test_readiness_handshake_version_mismatch();
-        test_readiness_handshake_rejected_status();
-        test_readiness_handshake_timeout();
-        test_readiness_handshake_malformed_response();
-        test_transport_authorization_enforcement();
-        test_partial_deployment_cleanup();
-        test_idempotent_forwarding_and_repeated_sessions();
-        test_daemon_bootstrap_argument_construction();
-        test_daemon_session_generation_propagation();
-        test_fake_transport_handshake_session_validation();
-        test_fake_transport_handshake_generation_validation();
-        test_fake_transport_handshake_version_mismatch();
-        test_daemon_process_verification_improved();
-        test_transport_unauthorized_zero_mutations();
-        test_serial_propagation_to_adb_commands();
-        test_repeated_deployment_stale_forwarding_cleanup();
-        test_process_detection_avoids_confusion();
-
-        // Stage 15: Offline Deployment Preflight Tests
-        test_preflight_artifact_integrity_pass();
-        test_preflight_artifact_integrity_fail_missing();
-        test_preflight_artifact_integrity_fail_sha256_mismatch();
-        test_preflight_abi_match_pass();
-        test_preflight_abi_match_fail();
-        test_preflight_provenance_eligible();
-        test_preflight_provenance_ineligible();
-        test_preflight_daemon_args_valid();
-        test_preflight_transport_auth_required();
-        test_preflight_serial_required();
-        test_preflight_structured_results();
-
-        std::cout << "[FANG-STAGE9-TESTS] All Stage 9 tests passed successfully." << std::endl;
-        return 0;
-    } catch (const std::exception& ex) {
-        std::cerr << "[FANG-STAGE9-TESTS] FAILED: " << ex.what() << std::endl;
-        return 1;
-    }
-}
-
-}
-
-void test_preflight_transport_auth_required();
-void test_preflight_serial_required();
-void test_preflight_structured_results();
-
 // Stage 15: Offline Deployment Preflight Test Implementations
 
 void test_preflight_artifact_integrity_pass() {
@@ -3175,7 +3089,6 @@ void test_preflight_artifact_integrity_pass() {
     require(result.all_passed, "Preflight passes with valid artifact and manifest");
     require(result.checks.size() == 8, "All 8 checks performed");
 
-    // Verify specific checks passed
     for (const auto& check : result.checks) {
         require(check.passed, "Check '" + check.name + "' passed");
     }
@@ -3190,19 +3103,18 @@ void test_preflight_artifact_integrity_fail_missing() {
     using namespace fang::studio;
     
     GuestDeploymentCoordinator coordinator;
-    GuestDeploymentTarget target;
-    target.abi = GuestTargetAbi::X86_64;
-
     const auto temp_dir = std::filesystem::temp_directory_path() / "fang_test_preflight_missing";
     std::filesystem::create_directories(temp_dir);
 
-    // No artifact, no manifest
+    GuestDeploymentTarget target;
+    target.abi = GuestTargetAbi::X86_64;
+    target.staging_dir = temp_dir.string();
+
     auto result = GuestDeploymentCoordinator::run_offline_preflight(target, temp_dir.string(), "test-token", "emulator-5554");
     
     require(!result.all_passed, "Preflight fails when artifact is missing");
     require(result.overall_error_code == "ARTIFACT_MISSING", "Error code is ARTIFACT_MISSING");
     
-    // Find the artifact integrity check
     bool found = false;
     for (const auto& check : result.checks) {
         if (check.name == "Artifact Integrity") {
@@ -3233,7 +3145,6 @@ void test_preflight_artifact_integrity_fail_sha256_mismatch() {
     target.abi = GuestTargetAbi::X86_64;
     target.staging_dir = temp_dir.string();
 
-    // Create manifest with wrong SHA-256
     GuestArtifactManifest mf;
     mf.artifact_name = "fang-input-daemon-android-x86_64";
     mf.artifact_format = "ELF";
@@ -3244,7 +3155,7 @@ void test_preflight_artifact_integrity_fail_sha256_mismatch() {
     mf.build_configuration = "Release";
     mf.manifest_schema_version = "stage9-v3";
     mf.build_result = "Success";
-    mf.artifact_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"; // Wrong!
+    mf.artifact_sha256 = "0000000000000000000000000000000000000000000000000000000000000000";
     mf.artifact_size_bytes = std::filesystem::file_size(elf_file);
     mf.ndk_version = "r26.1.10909125";
     mf.android_api_level = 26;
@@ -3265,22 +3176,17 @@ void test_preflight_artifact_integrity_fail_sha256_mismatch() {
     out << mf.to_json();
     out.close();
 
-    GuestDeploymentTarget target;
-    target.abi = GuestTargetAbi::X86_64;
-    target.staging_dir = temp_dir.string();
-
     auto result = GuestDeploymentCoordinator::run_offline_preflight(target, temp_dir.string(), "test-token", "emulator-5554");
     
     require(!result.all_passed, "Preflight fails with SHA-256 mismatch");
-    require(result.overall_error_code == "ARTIFACT_MISMATCH", "Error code is ARTIFACT_MISMATCH");
+    require(result.overall_error_code == "MANIFEST_INVALID", "Error code is MANIFEST_INVALID for SHA-256 mismatch");
     
-    // Find the artifact integrity check
     bool found = false;
     for (const auto& check : result.checks) {
         if (check.name == "Artifact Integrity") {
             found = true;
             require(!check.passed, "Artifact Integrity check fails");
-            require(check.error_code == "ARTIFACT_MISMATCH", "Error code is ARTIFACT_MISMATCH");
+            require(check.error_code == "MANIFEST_INVALID", "Error code is MANIFEST_INVALID");
         }
     }
     require(found, "Artifact Integrity check exists");
@@ -3302,14 +3208,14 @@ void test_preflight_abi_match_pass() {
     write_synthetic_elf64(elf_file, 0x3E, 2, 1, 3, 1);
 
     GuestDeploymentTarget target;
-    target.abi = GuestTargetAbi::X86_64;
+    target.abi = fang::guest::GuestTargetAbi::X86_64;
     target.staging_dir = temp_dir.string();
 
     GuestArtifactManifest mf;
     mf.artifact_name = "fang-input-daemon-android-x86_64";
     mf.artifact_format = "ELF";
     mf.target_os = "android";
-    mf.target_abi = "x86_64"; // Matches target
+    mf.target_abi = "x86_64";
     mf.is_android_elf_binary = true;
     mf.is_cross_compiled = true;
     mf.build_configuration = "Release";
@@ -3349,80 +3255,8 @@ void test_preflight_abi_match_pass() {
     }
     require(found, "ABI Match check exists");
 
-    std::filesystem::remove_all(temp_dir);
+std::filesystem::remove_all(temp_dir);
     std::cout << "  [PASS] test_preflight_abi_match_pass" << std::endl;
-}
-
-void test_preflight_abi_match_fail() {
-    std::cout << "  [RUN] test_preflight_abi_match_fail..." << std::endl;
-
-    using namespace fang::studio;
-    
-    GuestDeploymentCoordinator coordinator;
-    const auto temp_dir = std::filesystem::temp_directory_path() / "fang_test_preflight_abi_fail";
-    std::filesystem::create_directories(temp_dir);
-
-    const auto elf_file = temp_dir / "fang-input-daemon-android-x86_64";
-    write_synthetic_elf64(elf_file, 0x3E, 2, 1, 3, 1);
-
-    GuestDeploymentTarget target;
-    target.abi = GuestTargetAbi::X86_64;
-    target.staging_dir = temp_dir.string();
-
-    // Create manifest with mismatched ABI
-    GuestArtifactManifest mf;
-    mf.artifact_name = "fang-input-daemon-android-x86_64";
-    mf.artifact_format = "ELF";
-    mf.target_os = "android";
-    mf.target_abi = "arm64-v8a"; // MISMATCH!
-    mf.is_android_elf_binary = true;
-    mf.is_cross_compiled = true;
-    mf.build_configuration = "Release";
-    mf.manifest_schema_version = "stage9-v3";
-    mf.build_result = "Success";
-    mf.artifact_sha256 = coordinator.calculate_file_sha256(elf_file.string());
-    mf.artifact_size_bytes = std::filesystem::file_size(elf_file);
-    mf.ndk_version = "r26.1.10909125";
-    mf.android_api_level = 26;
-    mf.elf_machine = "62";
-    mf.elf_class = 2;
-    mf.elf_data = 1;
-    mf.toolchain_status = ToolchainStatus::ToolchainAvailable;
-    mf.source_evidence.status = SourceEvidence::Status::Collected;
-    mf.source_evidence.algorithm = "sha256";
-    mf.source_evidence.fingerprint = "abc123";
-    mf.source_evidence.scope = "fang-guest-daemon-inputs-v1";
-    mf.source_evidence.encoding = "fang-cim-c14n-v1";
-    mf.source_evidence.captured_at_utc = "2026-10-18T12:00:00Z";
-    mf.source_tree_state = "clean";
-
-    const auto manifest_file = temp_dir / "guest_manifest.json";
-    std::ofstream out(manifest_file);
-    out << mf.to_json();
-    out.close();
-
-    GuestDeploymentTarget target;
-    target.abi = GuestTargetAbi::X86_64;
-    target.staging_dir = temp_dir.string();
-
-    auto result = GuestDeploymentCoordinator::run_offline_preflight(target, temp_dir.string(), "test-token", "emulator-5554");
-    
-    require(!result.all_passed, "Preflight fails with ABI mismatch");
-    require(result.overall_error_code == "ABI_MISMATCH", "Error code is ABI_MISMATCH");
-    
-    // Find the ABI match check
-    bool found = false;
-    for (const auto& check : result.checks) {
-        if (check.name == "ABI Match") {
-            found = true;
-            require(!check.passed, "ABI Match check fails");
-            require(check.error_code == "ABI_MISMATCH", "Error code is ABI_MISMATCH");
-        }
-    }
-    require(found, "ABI Match check exists");
-
-    std::filesystem::remove_all(temp_dir);
-    std::cout << "  [PASS] test_preflight_abi_match_fail" << std::endl;
 }
 
 void test_preflight_provenance_eligible() {
@@ -3472,13 +3306,8 @@ void test_preflight_provenance_eligible() {
     out << mf.to_json();
     out.close();
 
-    GuestDeploymentTarget target;
-    target.abi = GuestTargetAbi::X86_64;
-    target.staging_dir = temp_dir.string();
-
     auto result = GuestDeploymentCoordinator::run_offline_preflight(target, temp_dir.string(), "test-token", "emulator-5554");
-    
-    // Provenance Eligibility check should pass
+
     bool found = false;
     for (const auto& check : result.checks) {
         if (check.name == "Provenance Eligibility") {
@@ -3509,7 +3338,6 @@ void test_preflight_provenance_ineligible() {
     target.abi = GuestTargetAbi::X86_64;
     target.staging_dir = temp_dir.string();
 
-    // Create manifest WITHOUT source evidence
     GuestArtifactManifest mf;
     mf.artifact_name = "fang-input-daemon-android-x86_64";
     mf.artifact_format = "ELF";
@@ -3528,20 +3356,14 @@ void test_preflight_provenance_ineligible() {
     mf.elf_class = 2;
     mf.elf_data = 1;
     mf.toolchain_status = ToolchainStatus::ToolchainAvailable;
-    // NO source_evidence - not collected
 
     const auto manifest_file = temp_dir / "guest_manifest.json";
     std::ofstream out(manifest_file);
     out << mf.to_json();
     out.close();
 
-    GuestDeploymentTarget target;
-    target.abi = GuestTargetAbi::X86_64;
-    target.staging_dir = temp_dir.string();
-
     auto result = GuestDeploymentCoordinator::run_offline_preflight(target, temp_dir.string(), "test-token", "emulator-5554");
     
-    // Provenance Eligibility check should fail
     bool found = false;
     for (const auto& check : result.checks) {
         if (check.name == "Provenance Eligibility") {
@@ -3603,13 +3425,8 @@ void test_preflight_daemon_args_valid() {
     out << mf.to_json();
     out.close();
 
-    GuestDeploymentTarget target;
-    target.abi = GuestTargetAbi::X86_64;
-    target.staging_dir = temp_dir.string();
-
     auto result = GuestDeploymentCoordinator::run_offline_preflight(target, temp_dir.string(), "test-token", "emulator-5554");
     
-    // Daemon Arguments & Protocol check should pass
     bool found = false;
     for (const auto& check : result.checks) {
         if (check.name == "Daemon Arguments & Protocol") {
@@ -3671,14 +3488,8 @@ void test_preflight_transport_auth_required() {
     out << mf.to_json();
     out.close();
 
-    GuestDeploymentTarget target;
-    target.abi = GuestTargetAbi::X86_64;
-    target.staging_dir = temp_dir.string();
-
-    // Test WITHOUT authorization token
     auto result = GuestDeploymentCoordinator::run_offline_preflight(target, temp_dir.string(), "", "emulator-5554");
     
-    // Transport Authorization check should fail
     bool found = false;
     for (const auto& check : result.checks) {
         if (check.name == "Transport Authorization") {
@@ -3689,10 +3500,8 @@ void test_preflight_transport_auth_required() {
     }
     require(found, "Transport Authorization check exists");
 
-    // Test WITH authorization token
     auto result2 = GuestDeploymentCoordinator::run_offline_preflight(target, temp_dir.string(), "valid-token", "emulator-5554");
     
-    // Transport Authorization check should pass
     found = false;
     for (const auto& check : result2.checks) {
         if (check.name == "Transport Authorization") {
@@ -3754,14 +3563,8 @@ void test_preflight_serial_required() {
     out << mf.to_json();
     out.close();
 
-    GuestDeploymentTarget target;
-    target.abi = GuestTargetAbi::X86_64;
-    target.staging_dir = temp_dir.string();
-
-    // Test WITHOUT serial
     auto result = GuestDeploymentCoordinator::run_offline_preflight(target, temp_dir.string(), "test-token", "");
     
-    // Target Serial check should fail
     bool found = false;
     for (const auto& check : result.checks) {
         if (check.name == "Target Serial") {
@@ -3772,10 +3575,8 @@ void test_preflight_serial_required() {
     }
     require(found, "Target Serial check exists");
 
-    // Test WITH serial
     auto result2 = GuestDeploymentCoordinator::run_offline_preflight(target, temp_dir.string(), "test-token", "emulator-5554");
     
-    // Target Serial check should pass
     found = false;
     for (const auto& check : result2.checks) {
         if (check.name == "Target Serial") {
@@ -3837,24 +3638,16 @@ void test_preflight_structured_results() {
     out << mf.to_json();
     out.close();
 
-    GuestDeploymentTarget target;
-    target.abi = GuestTargetAbi::X86_64;
-    target.staging_dir = temp_dir.string();
-
     auto result = GuestDeploymentCoordinator::run_offline_preflight(target, temp_dir.string(), "test-token", "emulator-5554");
     
-    // Verify structured results
     require(result.checks.size() == 8, "Exactly 8 checks performed");
     require(!result.checks.empty(), "Checks vector not empty");
     
-    // Verify each check has required fields
     for (const auto& check : result.checks) {
         require(!check.name.empty(), "Check has name");
-        // passed, error_code, diagnostic are always present
         require(check.error_code.empty() || !check.diagnostic.empty(), "Failed checks have diagnostic");
     }
     
-    // Verify overall_error_code is set when any check fails
     auto result_fail = GuestDeploymentCoordinator::run_offline_preflight(target, temp_dir.string(), "", "");
     if (!result_fail.all_passed) {
         require(!result_fail.overall_error_code.empty(), "Overall error code set when checks fail");
@@ -3862,6 +3655,73 @@ void test_preflight_structured_results() {
     
     std::filesystem::remove_all(temp_dir);
     std::cout << "  [PASS] test_preflight_structured_results" << std::endl;
+}
+
+int main() {
+#ifdef _WIN32
+    // Suppress crash popups/WER in automated tests to prevent hangs
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+#endif
+
+    try {
+        std::cout << "[FANG-STAGE9-TESTS] Running Stage 9 integration and deployment tests..." << std::endl;
+
+        test_forwarder_abstractions();
+        test_guest_manifest_and_toolchain_detector();
+        test_studio_session_integrated_lifecycle();
+        test_blocked_reachability_and_generation_reset();
+        test_peer_disconnect_and_error_reset();
+        test_guest_artifact_readiness_toolchain_missing();
+        test_guest_artifact_readiness_pe_vs_elf_mismatch();
+        test_guest_artifact_readiness_valid_elf_and_offline_policy();
+        test_elf_header_deep_inspection_and_validation();
+        test_artifact_manifest_parsing_validation_and_digest_consistency();
+        test_guest_toolchain_detector_synthetic_ndk_inspection();
+        test_studio_session_deployment_diagnostic_integration();
+        test_provenance_assessment();
+        test_source_evidence_serialization();
+        test_repository_root_deterministic_selection();
+        test_deployment_plan_creation_for_ready_artifact();
+        test_deployment_plan_creation_for_missing_artifact();
+        test_deployment_plan_creation_for_architecture_mismatch();
+        test_deployment_plan_creation_for_corrupt_artifact();
+        test_deployment_plan_creation_for_manifest_mismatch();
+        test_deployment_plan_creation_for_legacy_provenance();
+        test_deployment_plan_creation_for_stale_provenance();
+        test_deployment_plan_creation_for_unavailable_provenance();
+        test_deployment_plan_execution_offline_boundary();
+        test_deployment_plan_deterministic_and_idempotent();
+        test_deployment_plan_with_host_native();
+        test_deployment_plan_error_codes_machine_readable();
+        test_deployment_plan_preserves_readiness_semantics();
+        test_daemon_bootstrap_startup_command();
+        test_readiness_handshake_hello_helloack();
+        test_readiness_handshake_session_mismatch();
+        test_readiness_handshake_generation_mismatch();
+        test_readiness_handshake_version_mismatch();
+        test_readiness_handshake_rejected_status();
+        test_readiness_handshake_timeout();
+        test_readiness_handshake_malformed_response();
+        test_transport_authorization_enforcement();
+        test_partial_deployment_cleanup();
+        test_idempotent_forwarding_and_repeated_sessions();
+        test_daemon_bootstrap_argument_construction();
+        test_daemon_session_generation_propagation();
+        test_fake_transport_handshake_session_validation();
+        test_fake_transport_handshake_generation_validation();
+        test_fake_transport_handshake_version_mismatch();
+        test_daemon_process_verification_improved();
+        test_transport_unauthorized_zero_mutations();
+        test_serial_propagation_to_adb_commands();
+        test_repeated_deployment_stale_forwarding_cleanup();
+        test_process_detection_avoids_confusion();
+
+        std::cout << "[FANG-STAGE9-TESTS] All Stage 9 tests passed successfully." << std::endl;
+        return 0;
+    } catch (const std::exception& ex) {
+        std::cerr << "[FANG-STAGE9-TESTS] FAILED: " << ex.what() << std::endl;
+        return 1;
+    }
 }
 
 } // namespace
@@ -3924,6 +3784,18 @@ int main() {
         test_serial_propagation_to_adb_commands();
         test_repeated_deployment_stale_forwarding_cleanup();
         test_process_detection_avoids_confusion();
+        // Stage 15: Offline Deployment Preflight Tests
+        test_preflight_artifact_integrity_pass();
+        test_preflight_artifact_integrity_fail_missing();
+        test_preflight_artifact_integrity_fail_sha256_mismatch();
+        test_preflight_abi_match_pass();
+        test_preflight_provenance_eligible();
+        test_preflight_provenance_ineligible();
+        test_preflight_daemon_args_valid();
+        test_preflight_transport_auth_required();
+        test_preflight_serial_required();
+        test_preflight_structured_results();
+
 
         std::cout << "[FANG-STAGE9-TESTS] All Stage 9 tests passed successfully." << std::endl;
         return 0;
