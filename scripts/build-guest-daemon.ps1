@@ -365,7 +365,8 @@ $compileArgsForManifest = @(
     "-Wextra",
     "-D__ANDROID__",
     "-I", (Join-Path $repoRoot 'apps\fang-input-daemon').Replace('\', '/'),
-    "-I", (Join-Path $repoRoot 'apps\fang-studio').Replace('\', '/')
+    "-I", (Join-Path $repoRoot 'apps\fang-studio').Replace('\', '/'),
+    "-static-libstdc++"
 )
 if ($Configuration -eq "Release") {
     $compileArgsForManifest += @("-O2", "-DNDEBUG")
@@ -545,7 +546,8 @@ $compileArgs = @(
     "-Wextra",
     "-D__ANDROID__",
     "-I", (Join-Path $repoRoot 'apps\fang-input-daemon'),
-    "-I", (Join-Path $repoRoot 'apps\fang-studio')
+    "-I", (Join-Path $repoRoot 'apps\fang-studio'),
+    "-static-libstdc++"
 )
 
 if ($Configuration -eq "Release") {

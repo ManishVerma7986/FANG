@@ -12,57 +12,378 @@
 #include <array>
 #include <memory>
 #include <span>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <stdexcept>
+#include <utility>
 
 namespace fang::studio {
-
 // ============================================================================
 // Simple process executor for ADB commands
 // ============================================================================
 
+namespace {
+
+constexpr std::size_t max_captured_process_output = 64 * 1024;
+
+class UniqueHandle {
+public:
+    UniqueHandle() = default;
+    explicit UniqueHandle(HANDLE handle) noexcept : handle_(handle) {}
+    ~UniqueHandle() { reset(); }
+    UniqueHandle(const UniqueHandle&) = delete;
+    UniqueHandle& operator=(const UniqueHandle&) = delete;
+    UniqueHandle(UniqueHandle&& other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
+    UniqueHandle& operator=(UniqueHandle&& other) noexcept {
+        if (this != &other) {
+            reset(std::exchange(other.handle_, nullptr));
+        }
+        return *this;
+    }
+    HANDLE get() const noexcept { return handle_; }
+    explicit operator bool() const noexcept { return handle_ && handle_ != INVALID_HANDLE_VALUE; }
+    void reset(HANDLE handle = nullptr) noexcept {
+        if (*this) {
+            CloseHandle(handle_);
+        }
+        handle_ = handle;
+    }
+private:
+    HANDLE handle_{};
+};
+
 struct ProcessResult {
-    int exit_code{-1};
-    std::string output;
-    std::string error;
     bool succeeded{false};
+    bool timed_out{false};
+    std::string error_code;
+    std::string error;
+    std::optional<std::uint32_t> exit_code;
+    std::string stdout_output;
+    std::string stderr_output;
+    bool stdout_truncated{false};
+    bool stderr_truncated{false};
+};
+
+struct CapturedPipe {
+    std::string output;
+    bool truncated{false};
+    DWORD read_error{ERROR_SUCCESS};
+};
+
+std::wstring quote_windows_argument(std::wstring_view argument) {
+    std::wstring quoted(1, L'"');
+    std::size_t backslashes{};
+    for (const wchar_t character : argument) {
+        if (character == L'\\') {
+            ++backslashes;
+        } else if (character == L'"') {
+            quoted.append(backslashes * 2 + 1, L'\\');
+            quoted.push_back(L'"');
+            backslashes = 0;
+        } else {
+            quoted.append(backslashes, L'\\');
+            quoted.push_back(character);
+            backslashes = 0;
+        }
+    }
+    quoted.append(backslashes * 2, L'\\');
+    quoted.push_back(L'"');
+    return quoted;
+}
+
+bool utf8_to_wide(const std::string& value, std::wstring& output) {
+    if (value.find('\0') != std::string::npos || value.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        return false;
+    }
+    if (value.empty()) {
+        output.clear();
+        return true;
+    }
+    const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
+        static_cast<int>(value.size()), nullptr, 0);
+    if (count <= 0) {
+        return false;
+    }
+    output.resize(static_cast<std::size_t>(count));
+    return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
+        static_cast<int>(value.size()), output.data(), count) == count;
+}
+
+std::wstring build_windows_command_line(const std::filesystem::path& executable,
+                                        const std::vector<std::string>& args) {
+    std::wstring command_line = quote_windows_argument(executable.wstring());
+    for (const auto& arg : args) {
+        std::wstring wide_arg;
+        if (!utf8_to_wide(arg, wide_arg)) {
+            throw std::invalid_argument("ADB argument is not valid UTF-8 or contains NUL.");
+        }
+        command_line.push_back(L' ');
+        command_line += quote_windows_argument(wide_arg);
+        if (command_line.size() >= 32767) {
+            throw std::length_error("ADB command line exceeds the Windows process limit.");
+        }
+    }
+    return command_line;
+}
+
+void drain_available_pipe(HANDLE pipe, CapturedPipe& capture, bool& closed) noexcept {
+    if (closed) {
+        return;
+    }
+    std::array<char, 8192> buffer{};
+    DWORD available{};
+    if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) {
+        const DWORD error = GetLastError();
+        if (error != ERROR_BROKEN_PIPE && error != ERROR_NO_DATA) {
+            capture.read_error = error;
+        }
+        closed = true;
+        return;
+    }
+    if (available == 0) {
+        return;
+    }
+    DWORD bytes_read{};
+    const DWORD requested = std::min<DWORD>(available, static_cast<DWORD>(buffer.size()));
+    if (!ReadFile(pipe, buffer.data(), requested, &bytes_read, nullptr)) {
+        const DWORD error = GetLastError();
+        if (error != ERROR_BROKEN_PIPE && error != ERROR_OPERATION_ABORTED) {
+            capture.read_error = error;
+        }
+        closed = true;
+        return;
+    }
+    if (bytes_read == 0) {
+        closed = true;
+        return;
+    }
+    const std::size_t remaining = max_captured_process_output - capture.output.size();
+    const std::size_t copy_count = std::min<std::size_t>(remaining, bytes_read);
+    if (copy_count != 0) {
+        try {
+            capture.output.append(buffer.data(), copy_count);
+        } catch (...) {
+            capture.read_error = ERROR_NOT_ENOUGH_MEMORY;
+        }
+    }
+    if (copy_count < bytes_read) {
+        capture.truncated = true;
+    }
+}
+
+class AttributeList {
+public:
+    AttributeList() {
+        SIZE_T size{};
+        InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
+        storage_.resize(size);
+        list_ = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage_.data());
+        initialized_ = InitializeProcThreadAttributeList(list_, 1, 0, &size) != 0;
+    }
+    ~AttributeList() {
+        if (initialized_) {
+            DeleteProcThreadAttributeList(list_);
+        }
+    }
+    AttributeList(const AttributeList&) = delete;
+    AttributeList& operator=(const AttributeList&) = delete;
+    bool valid() const noexcept { return initialized_; }
+    LPPROC_THREAD_ATTRIBUTE_LIST get() const noexcept { return list_; }
+private:
+    std::vector<std::byte> storage_;
+    LPPROC_THREAD_ATTRIBUTE_LIST list_{};
+    bool initialized_{false};
 };
 
 class AdbProcessExecutor {
 public:
-    ProcessResult execute(const std::filesystem::path& executable, const std::vector<std::string>& args, std::chrono::milliseconds timeout) {
+    ProcessResult execute(const std::filesystem::path& executable,
+                          const std::vector<std::string>& args,
+                          std::chrono::milliseconds timeout) const {
         ProcessResult result;
-        
-        // Build command line
-        std::ostringstream cmd;
-        cmd << "\"" << executable.string() << "\"";
-        for (const auto& arg : args) {
-            cmd << " \"" << arg << "\"";
-        }
-        std::string command = cmd.str();
-        
-        // On Windows, use _popen to capture output
-        // For simplicity, we'll use a basic approach
-        FILE* pipe = _popen(command.c_str(), "r");
-        if (!pipe) {
-            result.exit_code = -1;
-            result.error = "Failed to execute command";
-            result.succeeded = false;
+        std::error_code path_error;
+        if (executable.empty() || !std::filesystem::is_regular_file(executable, path_error)) {
+            result.error_code = "ADB_NOT_FOUND";
+            result.error = "ADB executable not found: " + executable.string();
             return result;
         }
-        
-        std::array<char, 128> buffer;
-        std::string output;
-        while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
-            output += buffer.data();
+
+        std::wstring command_line;
+        try {
+            command_line = build_windows_command_line(std::filesystem::absolute(executable), args);
+        } catch (const std::exception& error) {
+            result.error_code = "ADB_ARGUMENT_INVALID";
+            result.error = error.what();
+            return result;
         }
-        
-        int exit_code = _pclose(pipe);
-        result.exit_code = exit_code;
-        result.output = output;
-        result.succeeded = (exit_code == 0);
-        
+
+        SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
+        HANDLE stdout_read_raw{}, stdout_write_raw{}, stderr_read_raw{}, stderr_write_raw{};
+        if (!CreatePipe(&stdout_read_raw, &stdout_write_raw, &security, 0) ||
+            !CreatePipe(&stderr_read_raw, &stderr_write_raw, &security, 0)) {
+            result.error_code = "ADB_PIPE_FAILED";
+            result.error = "CreatePipe failed with error " + std::to_string(GetLastError());
+            if (stdout_read_raw) CloseHandle(stdout_read_raw);
+            if (stdout_write_raw) CloseHandle(stdout_write_raw);
+            if (stderr_read_raw) CloseHandle(stderr_read_raw);
+            if (stderr_write_raw) CloseHandle(stderr_write_raw);
+            return result;
+        }
+        UniqueHandle stdout_read(stdout_read_raw);
+        UniqueHandle stdout_write(stdout_write_raw);
+        UniqueHandle stderr_read(stderr_read_raw);
+        UniqueHandle stderr_write(stderr_write_raw);
+        if (!SetHandleInformation(stdout_read.get(), HANDLE_FLAG_INHERIT, 0) ||
+            !SetHandleInformation(stderr_read.get(), HANDLE_FLAG_INHERIT, 0)) {
+            result.error_code = "ADB_PIPE_FAILED";
+            result.error = "SetHandleInformation failed with error " + std::to_string(GetLastError());
+            return result;
+        }
+
+        UniqueHandle stdin_handle(CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (!stdin_handle) {
+            result.error_code = "ADB_PIPE_FAILED";
+            result.error = "Opening NUL for child stdin failed with error " + std::to_string(GetLastError());
+            return result;
+        }
+
+        AttributeList attributes;
+        if (!attributes.valid()) {
+            result.error_code = "ADB_PIPE_FAILED";
+            result.error = "InitializeProcThreadAttributeList failed with error " + std::to_string(GetLastError());
+            return result;
+        }
+        HANDLE inherited_handles[]{stdin_handle.get(), stdout_write.get(), stderr_write.get()};
+        if (!UpdateProcThreadAttribute(attributes.get(), 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                inherited_handles, sizeof(inherited_handles), nullptr, nullptr)) {
+            result.error_code = "ADB_PIPE_FAILED";
+            result.error = "UpdateProcThreadAttribute failed with error " + std::to_string(GetLastError());
+            return result;
+        }
+
+        STARTUPINFOEXW startup{};
+        startup.StartupInfo.cb = sizeof(startup);
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = stdin_handle.get();
+        startup.StartupInfo.hStdOutput = stdout_write.get();
+        startup.StartupInfo.hStdError = stderr_write.get();
+        startup.lpAttributeList = attributes.get();
+
+        PROCESS_INFORMATION process_info{};
+        const std::wstring executable_path = std::filesystem::absolute(executable).wstring();
+        if (!CreateProcessW(executable_path.c_str(), command_line.data(), nullptr, nullptr, TRUE,
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW, nullptr, nullptr,
+                &startup.StartupInfo, &process_info)) {
+            result.error_code = "ADB_LAUNCH_FAILED";
+            result.error = "CreateProcessW failed with error " + std::to_string(GetLastError());
+            return result;
+        }
+        UniqueHandle process(process_info.hProcess);
+        UniqueHandle thread_handle(process_info.hThread);
+        stdout_write.reset();
+        stderr_write.reset();
+        stdin_handle.reset();
+
+        CapturedPipe stdout_capture;
+        CapturedPipe stderr_capture;
+        const auto timeout_count = std::max<std::int64_t>(0, timeout.count());
+        const DWORD timeout_ms = timeout_count >= MAXDWORD ? MAXDWORD - 1 : static_cast<DWORD>(timeout_count);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        auto drain_remaining = [](HANDLE pipe, CapturedPipe& capture, bool& closed) noexcept {
+            while (!closed) {
+                DWORD available = 0;
+                if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr) || available == 0) {
+                    break;
+                }
+                drain_available_pipe(pipe, capture, closed);
+            }
+        };
+
+        bool stdout_closed = false;
+        bool stderr_closed = false;
+        for (;;) {
+            drain_available_pipe(stdout_read.get(), stdout_capture, stdout_closed);
+            drain_available_pipe(stderr_read.get(), stderr_capture, stderr_closed);
+
+            const DWORD wait_result = WaitForSingleObject(process.get(), 0);
+            if (wait_result == WAIT_OBJECT_0) {
+                drain_remaining(stdout_read.get(), stdout_capture, stdout_closed);
+                drain_remaining(stderr_read.get(), stderr_capture, stderr_closed);
+                break;
+            }
+            if (wait_result == WAIT_FAILED) {
+                const DWORD error = GetLastError();
+                result.error_code = "ADB_WAIT_FAILED";
+                result.error = "WaitForSingleObject failed with error " + std::to_string(error);
+                TerminateProcess(process.get(), error);
+                WaitForSingleObject(process.get(), INFINITE);
+                drain_remaining(stdout_read.get(), stdout_capture, stdout_closed);
+                drain_remaining(stderr_read.get(), stderr_capture, stderr_closed);
+                break;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                result.timed_out = true;
+                result.error_code = "ADB_TIMEOUT";
+                result.error = "ADB command timed out after " + std::to_string(timeout.count()) + " ms.";
+                if (!TerminateProcess(process.get(), ERROR_TIMEOUT)) {
+                    result.error += " TerminateProcess failed with error " + std::to_string(GetLastError());
+                }
+                WaitForSingleObject(process.get(), INFINITE);
+                drain_remaining(stdout_read.get(), stdout_capture, stdout_closed);
+                drain_remaining(stderr_read.get(), stderr_capture, stderr_closed);
+                break;
+            }
+            Sleep(1);
+        }
+        result.stdout_output = std::move(stdout_capture.output);
+        result.stderr_output = std::move(stderr_capture.output);
+        result.stdout_truncated = stdout_capture.truncated;
+        result.stderr_truncated = stderr_capture.truncated;
+
+        DWORD exit_code{};
+        if (GetExitCodeProcess(process.get(), &exit_code)) {
+            result.exit_code = exit_code;
+        }
+        if (stdout_capture.read_error != ERROR_SUCCESS || stderr_capture.read_error != ERROR_SUCCESS) {
+            result.error_code = "ADB_READ_FAILED";
+            const DWORD error = stdout_capture.read_error != ERROR_SUCCESS
+                ? stdout_capture.read_error : stderr_capture.read_error;
+            result.error = "Reading ADB output failed with error " + std::to_string(error);
+        }
+        if (!result.timed_out && result.error_code.empty()) {
+            if (!result.exit_code) {
+                result.error_code = "ADB_EXIT_CODE_FAILED";
+                result.error = "GetExitCodeProcess failed with error " + std::to_string(GetLastError());
+            } else if (*result.exit_code != 0) {
+                result.error_code = "ADB_COMMAND_FAILED";
+                result.error = "ADB command exited with code " + std::to_string(*result.exit_code);
+            } else {
+                result.succeeded = true;
+            }
+        }
         return result;
     }
 };
+
+void copy_process_result(TransportResult& target, const ProcessResult& source) {
+    target.exit_code = source.exit_code;
+    target.stdout_output = source.stdout_output;
+    target.stderr_output = source.stderr_output;
+    target.stdout_truncated = source.stdout_truncated;
+    target.stderr_truncated = source.stderr_truncated;
+}
+
+void copy_process_result(TransportResult& target, const TransportResult& source) {
+    target.exit_code = source.exit_code;
+    target.stdout_output = source.stdout_output;
+    target.stderr_output = source.stderr_output;
+    target.stdout_truncated = source.stdout_truncated;
+    target.stderr_truncated = source.stderr_truncated;
+}
+
+} // namespace
 
 // ============================================================================
 // LoopbackTestForwarder
@@ -137,8 +458,7 @@ bool AdbTransport::verify_adb_available() const {
     if (!std::filesystem::exists(config_.adb_executable)) {
         return false;
     }
-    auto result = execute_adb_command({"version"}, std::chrono::milliseconds(5000));
-    return result.success;
+    return true;
 }
 
 std::string AdbTransport::format_adb_forward_cmd(const std::string& serial, uint16_t host_port, uint16_t guest_port) {
@@ -160,11 +480,11 @@ std::string AdbTransport::format_adb_shell_cmd(const std::string& serial, const 
 }
 
 TransportResult AdbTransport::execute_adb_command(const std::vector<std::string>& args, std::chrono::milliseconds timeout, std::string* output) const {
-    if (!verify_adb_available()) {
+    if (!std::filesystem::exists(config_.adb_executable)) {
         return TransportResult::fail("ADB_NOT_FOUND", "ADB executable not found or not functional", config_.adb_executable.string());
     }
 
-    std::vector<std::string> full_args = {"adb"};
+    std::vector<std::string> full_args;
     if (!config_.target_serial.empty()) {
         full_args.push_back("-s");
         full_args.push_back(config_.target_serial);
@@ -174,11 +494,18 @@ TransportResult AdbTransport::execute_adb_command(const std::vector<std::string>
     AdbProcessExecutor executor;
     auto result = executor.execute(config_.adb_executable, full_args, timeout);
     
-    if (!result.succeeded) {
-        return TransportResult::fail("ADB_COMMAND_FAILED", "ADB command failed with exit code " + std::to_string(result.exit_code), result.error.empty() ? result.output : result.error);
+    if (output) {
+        *output = result.stdout_output;
     }
-    if (output) *output = result.output;
-    return TransportResult::ok("Command succeeded");
+    const std::string detail = !result.stderr_output.empty() ? result.stderr_output
+        : (!result.stdout_output.empty() ? result.stdout_output : result.error);
+    TransportResult transport_result = result.succeeded
+        ? TransportResult::ok("Command succeeded")
+        : TransportResult::fail(result.error_code,
+            result.error.empty() ? "ADB command failed." : result.error,
+            detail);
+    copy_process_result(transport_result, result);
+    return transport_result;
 }
 
 bool AdbTransport::setup_forwarding(
@@ -264,7 +591,12 @@ TransportResult AdbTransport::push_binary(
     // Push binary
     auto result = execute_adb_command({"push", local_artifact_path.string(), guest_staging_path}, config_.push_timeout);
     if (!result.success) {
-        return TransportResult::fail("PUSH_FAILED", "ADB push failed", result.detail);
+        TransportResult failure = TransportResult::fail(
+            result.error_code.empty() ? "PUSH_FAILED" : result.error_code,
+            "ADB push failed: " + result.diagnostic,
+            result.detail);
+        copy_process_result(failure, result);
+        return failure;
     }
 
     // Verify remote integrity
@@ -285,7 +617,8 @@ TransportResult AdbTransport::verify_remote_artifact(
     std::string output;
     auto size_result = execute_adb_command({"shell", "stat", "-c", "%s", guest_staging_path}, config_.command_timeout, &output);
     if (!size_result.success) {
-        return TransportResult::fail("STAT_FAILED", "Failed to stat remote file", size_result.detail);
+        size_result.diagnostic = "Failed to stat remote file: " + size_result.diagnostic;
+        return size_result;
     }
     
     uint64_t remote_size = 0;
@@ -296,14 +629,17 @@ TransportResult AdbTransport::verify_remote_artifact(
     }
     
     if (remote_size != expected_size) {
-        return TransportResult::fail("SIZE_MISMATCH", "Remote artifact size mismatch", 
+        TransportResult mismatch = TransportResult::fail("SIZE_MISMATCH", "Remote artifact size mismatch",
             "Expected: " + std::to_string(expected_size) + ", Actual: " + std::to_string(remote_size));
+        copy_process_result(mismatch, size_result);
+        return mismatch;
     }
 
     // Check SHA-256
     auto sha_result = execute_adb_command({"shell", "sha256sum", guest_staging_path}, config_.command_timeout, &output);
     if (!sha_result.success) {
-        return TransportResult::fail("SHA_FAILED", "Failed to compute remote SHA-256", sha_result.detail);
+        sha_result.diagnostic = "Failed to compute remote SHA-256: " + sha_result.diagnostic;
+        return sha_result;
     }
     
     // Parse sha256sum output: "hash  filepath"
@@ -312,11 +648,15 @@ TransportResult AdbTransport::verify_remote_artifact(
     iss >> remote_sha;
     
     if (remote_sha != expected_sha256) {
-        return TransportResult::fail("SHA_MISMATCH", "Remote artifact SHA-256 mismatch", 
+        TransportResult mismatch = TransportResult::fail("SHA_MISMATCH", "Remote artifact SHA-256 mismatch",
             "Expected: " + expected_sha256 + ", Actual: " + remote_sha);
+        copy_process_result(mismatch, sha_result);
+        return mismatch;
     }
 
-    return TransportResult::ok("Remote artifact verified: size=" + std::to_string(remote_size) + ", sha256=" + remote_sha);
+    TransportResult verified = TransportResult::ok("Remote artifact verified: size=" + std::to_string(remote_size) + ", sha256=" + remote_sha);
+    copy_process_result(verified, sha_result);
+    return verified;
 }
 
 TransportResult AdbTransport::start_daemon(
@@ -333,7 +673,8 @@ TransportResult AdbTransport::start_daemon(
     // Make executable
     auto chmod_result = execute_adb_command({"shell", "chmod", "755", guest_staging_path}, config_.command_timeout);
     if (!chmod_result.success) {
-        return TransportResult::fail("CHMOD_FAILED", "Failed to make daemon executable", chmod_result.detail);
+        chmod_result.diagnostic = "Failed to make daemon executable: " + chmod_result.diagnostic;
+        return chmod_result;
     }
 
     // Start daemon - the artifact is a native ELF binary, not a Java class
@@ -345,7 +686,8 @@ TransportResult AdbTransport::start_daemon(
         " --backend recording";
     auto exec_result = execute_adb_command({"shell", cmd + " &"}, config_.startup_timeout);
     if (!exec_result.success) {
-        return TransportResult::fail("DAEMON_START_FAILED", "Failed to start guest daemon", exec_result.detail);
+        exec_result.diagnostic = "Failed to start guest daemon: " + exec_result.diagnostic;
+        return exec_result;
     }
 
     // Give the daemon a moment to bind to the port
@@ -520,7 +862,8 @@ TransportResult AdbTransport::validate_target(
     std::string output;
     auto devices_result = execute_adb_command({"devices"}, config_.command_timeout, &output);
     if (!devices_result.success) {
-        return TransportResult::fail("ADB_DEVICES_FAILED", "Failed to list ADB devices", devices_result.detail);
+        devices_result.diagnostic = "Failed to list ADB devices: " + devices_result.diagnostic;
+        return devices_result;
     }
 
     // Check our target serial is in the list and online
@@ -540,7 +883,8 @@ TransportResult AdbTransport::validate_target(
     // Check ABI via ro.product.cpu.abi
     auto abi_result = execute_adb_command({"shell", "getprop", "ro.product.cpu.abi"}, config_.command_timeout, &output);
     if (!abi_result.success) {
-        return TransportResult::fail("ABI_CHECK_FAILED", "Failed to get device ABI", abi_result.detail);
+        abi_result.diagnostic = "Failed to get device ABI: " + abi_result.diagnostic;
+        return abi_result;
     }
 
     std::string device_abi = output;
@@ -556,11 +900,19 @@ TransportResult AdbTransport::validate_target(
     }
 
     if (device_abi != expected_abi_str) {
-        return TransportResult::fail("ABI_MISMATCH", "Device ABI does not match expected artifact ABI", 
+        TransportResult mismatch = TransportResult::fail("ABI_MISMATCH", "Device ABI does not match expected artifact ABI",
             "Expected: " + expected_abi_str + ", Device: " + device_abi);
+        mismatch.stdout_output = abi_result.stdout_output;
+        mismatch.stderr_output = abi_result.stderr_output;
+        mismatch.exit_code = abi_result.exit_code;
+        mismatch.stdout_truncated = abi_result.stdout_truncated;
+        mismatch.stderr_truncated = abi_result.stderr_truncated;
+        return mismatch;
     }
 
-    return TransportResult::ok("Target validated: " + device_abi);
+    TransportResult validated = TransportResult::ok("Target validated: " + device_abi);
+    copy_process_result(validated, abi_result);
+    return validated;
 }
 
 // ============================================================================

@@ -1,0 +1,172 @@
+Start testing: Oct 19 21:23 India Standard Time
+----------------------------------------------------------
+17/19 Testing: android-gles-result-contract
+17/19 Test: android-gles-result-contract
+Command: "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe" "-NoProfile" "-ExecutionPolicy" "Bypass" "-File" "A:/PYTHON PROJECT/Fang root folder/Fang/tests/integration/android_gles_result_contract.ps1"
+Directory: A:/PYTHON PROJECT/Fang root folder/Fang/build
+"android-gles-result-contract" start time: Oct 19 21:23 India Standard Time
+Output:
+----------------------------------------------------------
+Android GLES result contract tests passed: strict and legacy manifests, unavailable provenance, UTC timestamp, refresh consistency, invalid status, CSV integrity, and missing renderer.
+<end of output>
+Test time =   1.64 sec
+----------------------------------------------------------
+Test Passed.
+"android-gles-result-contract" end time: Oct 19 21:23 India Standard Time
+"android-gles-result-contract" time elapsed: 00:00:01
+----------------------------------------------------------
+
+18/19 Testing: android-animated-gles-result-contract
+18/19 Test: android-animated-gles-result-contract
+Command: "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe" "-NoProfile" "-ExecutionPolicy" "Bypass" "-File" "A:/PYTHON PROJECT/Fang root folder/Fang/tests/integration/animated_gles_result_contract.ps1"
+Directory: A:/PYTHON PROJECT/Fang root folder/Fang/build
+"android-animated-gles-result-contract" start time: Oct 19 21:23 India Standard Time
+Output:
+----------------------------------------------------------
+Animated GLES result-contract fixtures passed.
+<end of output>
+Test time =   1.97 sec
+----------------------------------------------------------
+Test Passed.
+"android-animated-gles-result-contract" end time: Oct 19 21:23 India Standard Time
+"android-animated-gles-result-contract" time elapsed: 00:00:01
+----------------------------------------------------------
+
+19/19 Testing: guest-daemon-build-pipeline-contract
+19/19 Test: guest-daemon-build-pipeline-contract
+Command: "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe" "-NoProfile" "-ExecutionPolicy" "Bypass" "-File" "A:/PYTHON PROJECT/Fang root folder/Fang/tests/integration/guest_daemon_build_pipeline_contract.ps1"
+Directory: A:/PYTHON PROJECT/Fang root folder/Fang/build
+"guest-daemon-build-pipeline-contract" start time: Oct 19 21:23 India Standard Time
+Output:
+----------------------------------------------------------
+[TEST 1] Missing NDK Path Rejection...
+Find-NdkPath : ERROR: Explicit -NdkPath 
+'C:\Users\dharm\AppData\Local\Temp\fang_build_contract_e5c55a1c735a4e52ba5d3d678d04f97a\nonexistent_ndk_dir' does not 
+exist.
+At A:\PYTHON PROJECT\Fang root folder\Fang\scripts\build-guest-daemon.ps1:113 char:16
++ $resolvedNdk = Find-NdkPath -ExplicitPath $NdkPath
++                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:) [Write-Error], WriteErrorException
+    + FullyQualifiedErrorId : Microsoft.PowerShell.Commands.WriteErrorException,Find-NdkPath
+ 
+  -> PASSED (Exit code: 1)
+[TEST 2] Missing source.properties Rejection...
+A:\PYTHON PROJECT\Fang root folder\Fang\scripts\build-guest-daemon.ps1 : ERROR: Invalid Android NDK at 
+'C:\Users\dharm\AppData\Local\Temp\fang_build_contract_e5c55a1c735a4e52ba5d3d678d04f97a\empty_ndk': missing 
+source.properties.
+At line:1 char:1
++ & 'A:\PYTHON PROJECT\Fang root folder\Fang\scripts\build-guest-daemon ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:) [Write-Error], WriteErrorException
+    + FullyQualifiedErrorId : Microsoft.PowerShell.Commands.WriteErrorException,build-guest-daemon.ps1
+ 
+  -> PASSED (Exit code: 1)
+[TEST 3] Under-Versioned NDK (r23 < r25) Rejection...
+A:\PYTHON PROJECT\Fang root folder\Fang\scripts\build-guest-daemon.ps1 : ERROR: Android NDK version '23.1.7779620' at 
+'C:\Users\dharm\AppData\Local\Temp\fang_build_contract_e5c55a1c735a4e52ba5d3d678d04f97a\old_ndk' is below the minimum 
+required version r25.
+At line:1 char:1
++ & 'A:\PYTHON PROJECT\Fang root folder\Fang\scripts\build-guest-daemon ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:) [Write-Error], WriteErrorException
+    + FullyQualifiedErrorId : Microsoft.PowerShell.Commands.WriteErrorException,build-guest-daemon.ps1
+ 
+  -> PASSED (Exit code: 1)
+[TEST 4] Unsupported ABI Selection Rejection...
+A:\PYTHON PROJECT\Fang root folder\Fang\scripts\build-guest-daemon.ps1 : ERROR: Unsupported Android ABI 
+'unsupported_mips'. Supported: x86_64, arm64-v8a, x86, armeabi-v7a.
+At line:1 char:1
++ & 'A:\PYTHON PROJECT\Fang root folder\Fang\scripts\build-guest-daemon ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:) [Write-Error], WriteErrorException
+    + FullyQualifiedErrorId : Microsoft.PowerShell.Commands.WriteErrorException,build-guest-daemon.ps1
+ 
+  -> PASSED (Exit code: 1)
+[TEST 5] Synthetic Valid NDK r26 with -ValidateOnly Succeeded...
+Discovered Android NDK: C:\Users\dharm\AppData\Local\Temp\fang_build_contract_e5c55a1c735a4e52ba5d3d678d04f97a\valid_ndk (version r26.1.10909125)
+Target Clang++: C:\Users\dharm\AppData\Local\Temp\fang_build_contract_e5c55a1c735a4e52ba5d3d678d04f97a\valid_ndk\toolchains\llvm\prebuilt\windows-x86_64\bin\clang++.exe
+Toolchain validation succeeded.
+  -> PASSED (Exit code: 0)
+[TEST 6] CMD Wrapper Preserves Exit Code and Arguments...
+Discovered Android NDK: C:\Users\dharm\AppData\Local\Temp\fang_build_contract_e5c55a1c735a4e52ba5d3d678d04f97a\valid_ndk (version r26.1.10909125)
+Target Clang++: C:\Users\dharm\AppData\Local\Temp\fang_build_contract_e5c55a1c735a4e52ba5d3d678d04f97a\valid_ndk\toolchains\llvm\prebuilt\windows-x86_64\bin\clang++.exe
+Toolchain validation succeeded.
+A:\PYTHON PROJECT\Fang root folder\Fang\scripts\build-guest-daemon.ps1 : ERROR: Android NDK version '23.1.7779620' at 
+'C:\Users\dharm\AppData\Local\Temp\fang_build_contract_e5c55a1c735a4e52ba5d3d678d04f97a\old_ndk' is below the minimum 
+required version r25.
+At line:1 char:1
++ & 'A:\PYTHON PROJECT\Fang root folder\Fang\scripts\build-guest-daemon ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:) [Write-Error], WriteErrorException
+    + FullyQualifiedErrorId : Microsoft.PowerShell.Commands.WriteErrorException,build-guest-daemon.ps1
+ 
+  -> PASSED (CMD wrapper exit codes: success=0, failure=1)
+[TEST 7] Repository and Output Paths Containing Spaces...
+Discovered Android NDK: C:\Users\dharm\AppData\Local\Temp\fang_build_contract_e5c55a1c735a4e52ba5d3d678d04f97a\valid_ndk (version r26.1.10909125)
+Target Clang++: C:\Users\dharm\AppData\Local\Temp\fang_build_contract_e5c55a1c735a4e52ba5d3d678d04f97a\valid_ndk\toolchains\llvm\prebuilt\windows-x86_64\bin\clang++.exe
+Compiling guest daemon for x86_64-linux-android26 (Release)...
+C:\Users\dharm\AppData\Local\Temp\fang_build_contract_e5c55a1c735a4e52ba5d3d678d04f97a\valid_ndk\toolchains\llvm\prebuilt\windows-x86_64\bin\clang++.exe --target=x86_64-linux-android26 -std=c++20 -fPIE -pie -Wall -Wextra -D__ANDROID__ -I "A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-input-daemon" -I "A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio" -static-libstdc++ -O2 -DNDEBUG "A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-input-daemon\main.cpp" "A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-input-daemon\guest_input_backend.cpp" "A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-input-daemon\guest_input_daemon.cpp" "A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-input-daemon\guest_manifest.cpp" "A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\input_ipc_protocol.cpp" "A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\input_transport.cpp" "A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-studio\socket_input_transport.cpp" -o C:\Users\dharm\AppData\Local\Temp\fang_build_fa05c4e215e74a18bd85faff682f2220\fang-input-daemon-android-x86_64
+A:\PYTHON PROJECT\Fang root folder\Fang\scripts\build-guest-daemon.ps1 : ERROR: Failed to invoke compiler 'C:\Users\dha
+rm\AppData\Local\Temp\fang_build_contract_e5c55a1c735a4e52ba5d3d678d04f97a\valid_ndk\toolchains\llvm\prebuilt\windows-x
+86_64\bin\clang++.exe': Program 'clang++.exe' failed to run: The specified executable is not a valid application for 
+this OS platform.At A:\PYTHON PROJECT\Fang root folder\Fang\scripts\build-guest-daemon.ps1:572 char:5
++     & $clangCxx @compileArgs
++     ~~~~~~~~~~~~~~~~~~~~~~~~.
+At line:1 char:1
++ & 'A:\PYTHON PROJECT\Fang root folder\Fang\scripts\build-guest-daemon ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:) [Write-Error], WriteErrorException
+    + FullyQualifiedErrorId : Microsoft.PowerShell.Commands.WriteErrorException,build-guest-daemon.ps1
+ 
+  -> PASSED (Exit code: 1; spaced paths handled)
+[TEST 8] Source Fingerprint Computed and Included in Manifest (Real NDK)...
+Discovered Android NDK: C:\Users\dharm\AppData\Local\Android\Sdk\ndk\30.0.16248370 (version r30.0.16248370)
+Target Clang++: C:\Users\dharm\AppData\Local\Android\Sdk\ndk\30.0.16248370\toolchains\llvm\prebuilt\windows-x86_64\bin\clang++.exe
+Compiling guest daemon for x86_64-linux-android26 (Release)...
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-input-daemon\guest_input_daemon.cpp:420:10: warning: unused variable 'cancel' [-Wunused-variable]
+  420 |     auto cancel = decode_cancel_all_message(payload, parse_err);
+      |          ^~~~~~
+1 warning generated.
+Performing snapshot consistency check...
+Snapshot consistency check passed.
+Successfully compiled and validated Android guest daemon artifact:
+  Artifact: C:\Users\dharm\AppData\Local\Temp\fang_build_contract_e5c55a1c735a4e52ba5d3d678d04f97a\test8_out\fang-input-daemon-android-x86_64 (5695200 bytes)
+  SHA-256:  c9418bdd249e20f2b91285b74013d683386488ee1fdcb43167d95e64f75e5cb3
+  ABI:      x86_64 (API 26, Machine: 0x3E)
+  Manifest: C:\Users\dharm\AppData\Local\Temp\fang_build_contract_e5c55a1c735a4e52ba5d3d678d04f97a\test8_out\guest_manifest.json
+  Source revision: 71a8ef4ff69bea668dcfeebcbdeb376a29072ffe
+  Source tree state: dirty
+  Dirty files: 39
+  Source fingerprint: 68e1404fd82654c6860d33d460d2b88d0b57f7d08028e276217ab7050132271b
+  Source evidence status: collected
+  -> PASSED (Fingerprint: 68e1404fd826...)
+[TEST 9] Fingerprint Stability Across Builds (Real NDK)...
+Discovered Android NDK: C:\Users\dharm\AppData\Local\Android\Sdk\ndk\30.0.16248370 (version r30.0.16248370)
+Target Clang++: C:\Users\dharm\AppData\Local\Android\Sdk\ndk\30.0.16248370\toolchains\llvm\prebuilt\windows-x86_64\bin\clang++.exe
+Compiling guest daemon for x86_64-linux-android26 (Release)...
+A:\PYTHON PROJECT\Fang root folder\Fang\apps\fang-input-daemon\guest_input_daemon.cpp:420:10: warning: unused variable 'cancel' [-Wunused-variable]
+  420 |     auto cancel = decode_cancel_all_message(payload, parse_err);
+      |          ^~~~~~
+1 warning generated.
+Performing snapshot consistency check...
+Snapshot consistency check passed.
+Successfully compiled and validated Android guest daemon artifact:
+  Artifact: C:\Users\dharm\AppData\Local\Temp\fang_build_contract_e5c55a1c735a4e52ba5d3d678d04f97a\test9_out\fang-input-daemon-android-x86_64 (5695200 bytes)
+  SHA-256:  c9418bdd249e20f2b91285b74013d683386488ee1fdcb43167d95e64f75e5cb3
+  ABI:      x86_64 (API 26, Machine: 0x3E)
+  Manifest: C:\Users\dharm\AppData\Local\Temp\fang_build_contract_e5c55a1c735a4e52ba5d3d678d04f97a\test9_out\guest_manifest.json
+  Source revision: 71a8ef4ff69bea668dcfeebcbdeb376a29072ffe
+  Source tree state: dirty
+  Dirty files: 39
+  Source fingerprint: 68e1404fd82654c6860d33d460d2b88d0b57f7d08028e276217ab7050132271b
+  Source evidence status: collected
+  -> PASSED (Fingerprint stable: 68e1404fd826...)
+<end of output>
+Test time =  44.46 sec
+----------------------------------------------------------
+Test Passed.
+"guest-daemon-build-pipeline-contract" end time: Oct 19 21:24 India Standard Time
+"guest-daemon-build-pipeline-contract" time elapsed: 00:00:44
+----------------------------------------------------------
+
+End testing: Oct 19 21:24 India Standard Time

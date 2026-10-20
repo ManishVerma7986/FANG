@@ -1,0 +1,5 @@
+﻿{
+    "config_version":  "1.0",
+    "target_serial":  "emulator-5554",
+    "authorization_token":  "test-auth-token-12345"
+}

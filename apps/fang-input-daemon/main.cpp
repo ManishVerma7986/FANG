@@ -78,27 +78,39 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         std::cout << "Fang guest input daemon listening on " << server.bound_address() << ":" << server.bound_port() << "...\n";
+        std::cout.flush();
 
-        std::shared_ptr<fang::studio::SocketInputTransport> client_transport;
-        while (g_running && !client_transport) {
-            client_transport = server.accept_client(200);
-        }
+std::shared_ptr<fang::studio::SocketInputTransport> client_transport;
+          while (g_running && !client_transport) {
+              client_transport = server.accept_client(200);
+          }
 
-        if (!client_transport) {
-            std::cout << "Server stopped before client connected.\n";
-            return 0;
-        }
+          if (!client_transport) {
+              std::cout << "Server stopped before client connected.\n";
+              return 0;
+          }
 
-        std::cout << "Host client connected from port " << client_transport->remote_port() << ".\n";
-        fang::guest::GuestInputDaemon daemon(client_transport, backend, config);
+          std::cerr << "[DEBUG main] client_transport obtained: connected=" << client_transport->is_connected() 
+                    << " state=" << static_cast<int>(client_transport->state())
+                    << " remote_port=" << client_transport->remote_port() << std::endl;
+
+          std::cout << "Host client connected from port " << client_transport->remote_port() << ".\n";
+          std::cout.flush();
+          fang::guest::GuestInputDaemon daemon(client_transport, backend, config);
         if (!daemon.start()) {
             std::cerr << "Failed to start guest input daemon: " << daemon.status_diagnostic() << "\n";
             return 1;
         }
 
         std::cout << "Status: " << daemon.status_diagnostic() << "\n";
-        while (g_running && daemon.is_active()) {
+        std::cout.flush();
+        uint64_t loop_count = 0;
+        while (g_running && daemon.state() != fang::guest::GuestInputDaemon::DaemonState::Disconnected && daemon.state() != fang::guest::GuestInputDaemon::DaemonState::Error) {
             daemon.poll_and_process();
+            loop_count++;
+            if (loop_count % 100000 == 0) {
+                std::cerr << "[DEBUG] Loop " << loop_count << ", state=" << static_cast<int>(daemon.state()) << ", diagnostic=" << daemon.status_diagnostic() << "\n";
+            }
         }
 
         daemon.shutdown();
@@ -107,7 +119,7 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    auto transport = std::make_shared<fang::studio::LoopbackInputTransport>();
+auto transport = std::make_shared<fang::studio::LoopbackInputTransport>();
     fang::guest::GuestInputDaemon daemon(transport, backend, config);
 
     if (!daemon.start()) {
@@ -119,6 +131,11 @@ int main(int argc, char* argv[]) {
               << ", Session: " << config.expected_session_id
               << ", Generation: " << config.expected_generation_id << "\n";
     std::cout << "Status: " << daemon.status_diagnostic() << "\n";
+    std::cout.flush();
+
+    while (g_running && daemon.state() != fang::guest::GuestInputDaemon::DaemonState::Disconnected && daemon.state() != fang::guest::GuestInputDaemon::DaemonState::Error) {
+        daemon.poll_and_process();
+    }
 
     daemon.shutdown();
     std::cout << "Fang guest input daemon stopped cleanly.\n";

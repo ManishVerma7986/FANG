@@ -1,8 +1,9 @@
-﻿#include "guest_deployment_coordinator.hpp"
+#include "guest_deployment_coordinator.hpp"
 
 #include <algorithm>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 #include <filesystem>
 #include <chrono>
@@ -189,31 +190,39 @@ static std::string hash_file_sha256(const std::string& file_path) {
 }
 
 static void add_canonical_entry(std::vector<CanonicalEntry>& entries,
-                                const std::string& repo_root,
-                                const std::string& rel_path,
-                                CanonicalRole role,
-                                CanonicalKind kind = CanonicalKind::File,
-                                std::vector<std::string>* errors = nullptr) {
-    std::string full_path = repo_root + "/" + rel_path;
-    std::ifstream file(full_path, std::ios::binary);
-    if (!file) {
-        if (errors) errors->push_back("Build input not found: " + rel_path);
-        return;
-    }
-    file.seekg(0, std::ios::end);
-    uint64_t size = static_cast<uint64_t>(file.tellg());
-    file.seekg(0, std::ios::beg);
-    std::vector<uint8_t> buffer(size);
-    file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(size));
-    if (!file) {
-        if (errors) errors->push_back("Failed to read build input: " + rel_path);
-        return;
-    }
-    sha256::Context ctx;
-    ctx.update(buffer.data(), buffer.size());
-    std::string hash = ctx.finalize();
-    entries.push_back({rel_path, role, kind, size, hash});
-}
+                                  const std::string& repo_root,
+                                  const std::string& rel_path,
+                                  CanonicalRole role,
+                                  CanonicalKind kind = CanonicalKind::File,
+                                  std::vector<std::string>* errors = nullptr) {
+      std::string full_path = repo_root + "/" + rel_path;
+      printf("  DEBUG add_canonical_entry: full_path=%s\n", full_path.c_str());
+      fflush(stdout);
+      std::ifstream file(full_path, std::ios::binary);
+      if (!file) {
+          if (errors) errors->push_back("Build input not found: " + rel_path);
+          printf("  DEBUG add_canonical_entry: file not found\n");
+          fflush(stdout);
+          return;
+      }
+      file.seekg(0, std::ios::end);
+      uint64_t size = static_cast<uint64_t>(file.tellg());
+      file.seekg(0, std::ios::beg);
+      std::vector<uint8_t> buffer(size);
+      file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(size));
+      if (!file) {
+          if (errors) errors->push_back("Failed to read build input: " + rel_path);
+          printf("  DEBUG add_canonical_entry: failed to read file\n");
+          fflush(stdout);
+          return;
+      }
+      sha256::Context ctx;
+      ctx.update(buffer.data(), buffer.size());
+      std::string hash = ctx.finalize();
+      entries.push_back({rel_path, role, kind, size, hash});
+      printf("  DEBUG add_canonical_entry: success, hash=%s\n", hash.c_str());
+      fflush(stdout);
+  }
 
 static void add_virtual_entry(std::vector<CanonicalEntry>& entries,
                               const std::string& path,
@@ -404,6 +413,109 @@ std::string get_abi_string(fang::guest::GuestTargetAbi abi) {
 }
 
 } // namespace
+
+// ----------------------------------------------------------------------------
+// LiveDeploymentConfig Implementation
+// ----------------------------------------------------------------------------
+
+std::filesystem::path LiveDeploymentConfig::default_config_path() {
+    try {
+        // First check current working directory
+        std::filesystem::path cwd_config = std::filesystem::current_path() / ".fang-live-config.json";
+        if (std::filesystem::exists(cwd_config)) {
+            return cwd_config;
+        }
+        // Then check user home directory
+        const char* home = nullptr;
+#if defined(_WIN32)
+        home = std::getenv("USERPROFILE");
+#else
+        home = std::getenv("HOME");
+#endif
+        if (home) {
+            std::filesystem::path home_config = std::filesystem::path(home) / ".fang-live-config.json";
+            if (std::filesystem::exists(home_config)) {
+                return home_config;
+            }
+        }
+        // Return default path (current working directory)
+        return cwd_config;
+    } catch (...) {
+        // If anything fails, return a safe default
+        return std::filesystem::path(".fang-live-config.json");
+    }
+}
+
+std::optional<LiveDeploymentConfig> LiveDeploymentConfig::load_from_file(const std::filesystem::path& config_path) {
+    try {
+        std::filesystem::path path = config_path.empty() ? default_config_path() : config_path;
+        
+        if (!std::filesystem::exists(path)) {
+            return std::nullopt;
+        }
+        
+        std::ifstream file(path);
+        if (!file) {
+            return std::nullopt;
+        }
+        
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+        std::string json = buffer.str();
+        
+        // Strip UTF-8 BOM if present (0xEF 0xBB 0xBF)
+        if (json.size() >= 3 && 
+            static_cast<unsigned char>(json[0]) == 0xEF &&
+            static_cast<unsigned char>(json[1]) == 0xBB &&
+            static_cast<unsigned char>(json[2]) == 0xBF) {
+            json = json.substr(3);
+        }
+        
+        // Parse JSON manually (simple key-value extraction for our known fields)
+        LiveDeploymentConfig config;
+        
+        auto extract_string = [](const std::string& json, const std::string& key) -> std::string {
+            std::string search = "\"" + key + "\"";
+            size_t pos = json.find(search);
+            if (pos == std::string::npos) return "";
+            pos = json.find(':', pos);
+            if (pos == std::string::npos) return "";
+            pos = json.find('"', pos);
+            if (pos == std::string::npos) return "";
+            size_t end = json.find('"', pos + 1);
+            if (end == std::string::npos) return "";
+            return json.substr(pos + 1, end - pos - 1);
+        };
+        
+        config.target_serial = extract_string(json, "target_serial");
+        config.authorization_token = extract_string(json, "authorization_token");
+        config.config_version = extract_string(json, "config_version");
+        if (config.config_version.empty()) config.config_version = "1.0";
+        
+        if (!config.is_valid()) {
+            return std::nullopt;
+        }
+        
+        return config;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+void LiveDeploymentConfig::save_to_file(const std::filesystem::path& config_path) const {
+    std::filesystem::path path = config_path.empty() ? default_config_path() : config_path;
+    
+    std::ofstream file(path);
+    if (!file) {
+        throw std::runtime_error("Failed to open config file for writing: " + path.string());
+    }
+    
+    file << "{\n";
+    file << "  \"config_version\": \"" << config_version << "\",\n";
+    file << "  \"target_serial\": \"" << target_serial << "\",\n";
+    file << "  \"authorization_token\": \"" << authorization_token << "\"\n";
+    file << "}\n";
+}
 
 // ----------------------------------------------------------------------------
 // MockGuestDeploymentCoordinator
@@ -710,6 +822,14 @@ bool GuestDeploymentCoordinator::validate_artifact_manifest(
     ss << mf.rdbuf();
     std::string json = ss.str();
 
+    // Strip UTF-8 BOM if present (0xEF 0xBB 0xBF)
+    if (json.size() >= 3 && 
+        static_cast<unsigned char>(json[0]) == 0xEF &&
+        static_cast<unsigned char>(json[1]) == 0xBB &&
+        static_cast<unsigned char>(json[2]) == 0xBF) {
+        json = json.substr(3);
+    }
+
     std::string parse_err;
     if (!fang::guest::GuestArtifactManifest::from_json(json, out_manifest, &parse_err)) {
         if (error) *error = "Manifest parsing failed: " + parse_err;
@@ -752,11 +872,14 @@ bool GuestDeploymentCoordinator::validate_artifact_manifest(
         return false;
     }
     if (out_manifest.elf_machine != std::to_string(actual_elf.machine_arch)) {
-        // normalize: compare hex form too
-        std::ostringstream hx; hx << "0x" << std::hex << actual_elf.machine_arch;
-        if (out_manifest.elf_machine != hx.str()) {
+        // normalize: compare hex form too (case-insensitive)
+        std::ostringstream hx; hx << "0x" << std::hex << std::uppercase << actual_elf.machine_arch;
+        std::string hx_upper = hx.str();
+        hx.str(""); hx.clear(); hx << "0x" << std::hex << std::nouppercase << actual_elf.machine_arch;
+        std::string hx_lower = hx.str();
+        if (out_manifest.elf_machine != hx_upper && out_manifest.elf_machine != hx_lower) {
             if (error) *error = "Manifest ELF machine (" + out_manifest.elf_machine +
-                ") does not match artifact ELF machine (" + hx.str() + ")";
+                ") does not match artifact ELF machine (" + hx_upper + ")";
             return false;
         }
     }
@@ -853,89 +976,116 @@ static std::string hash_file_sha256(const std::string& file_path) {
     }
     return ctx.finalize();
 }
-
 bool GuestDeploymentCoordinator::collect_current_source_evidence(
-    const std::string& repo_root,
-    const std::string& abi,
-    uint32_t api_level,
-    const std::string& configuration,
-    const std::string& target_triple,
-    const std::string& ndk_version,
-    const std::vector<std::string>& compile_args,
-    fang::guest::SourceEvidence& out_evidence,
-    std::string* error) {
-    out_evidence = fang::guest::SourceEvidence{};
-    out_evidence.status = fang::guest::SourceEvidence::Status::Unavailable;
-    out_evidence.algorithm = "sha256";
-    out_evidence.scope = "fang-guest-daemon-inputs-v1";
-    out_evidence.encoding = "fang-cim-c14n-v1";
-    out_evidence.captured_at_utc = get_utc_timestamp();
+      const std::string& repo_root,
+      const std::string& abi,
+      uint32_t api_level,
+      const std::string& configuration,
+      const std::string& target_triple,
+      const std::string& ndk_version,
+      const std::vector<std::string>& compile_args,
+      fang::guest::SourceEvidence& out_evidence,
+      std::string* error) {
+      printf("  DEBUG collect_current_source_evidence: entry repo_root=%s\n", repo_root.c_str());
+      fflush(stdout);
+      out_evidence = fang::guest::SourceEvidence{};
+      out_evidence.status = fang::guest::SourceEvidence::Status::Unavailable;
+      out_evidence.algorithm = "sha256";
+      out_evidence.scope = "fang-guest-daemon-inputs-v1";
+      out_evidence.encoding = "fang-cim-c14n-v1";
+      out_evidence.captured_at_utc = get_utc_timestamp();
 
-    // Get current HEAD revision
-    std::string head_rev = run_git_command(repo_root, "rev-parse HEAD");
-    if (head_rev.empty()) {
-        out_evidence.unavailable_reasons.push_back("git rev-parse HEAD failed or returned empty");
-        if (error) *error = "Failed to get current HEAD revision";
-        return false;
-    }
-    while (!head_rev.empty() && (head_rev.back() == '\n' || head_rev.back() == '\r' || head_rev.back() == ' ')) {
-        head_rev.pop_back();
-    }
+      // Get current HEAD revision
+      printf("  DEBUG collect_current_source_evidence: running git rev-parse HEAD\n");
+      fflush(stdout);
+      std::string head_rev = run_git_command(repo_root, "rev-parse HEAD");
+      printf("  DEBUG collect_current_source_evidence: head_rev=%s\n", head_rev.c_str());
+      fflush(stdout);
+      if (head_rev.empty()) {
+          out_evidence.unavailable_reasons.push_back("git rev-parse HEAD failed or returned empty");
+          if (error) *error = "Failed to get current HEAD revision";
+          return false;
+      }
+      while (!head_rev.empty() && (head_rev.back() == '\n' || head_rev.back() == '\r' || head_rev.back() == ' ')) {
+          head_rev.pop_back();
+      }
 
-    // Get porcelain v2 status with NUL delimiter (for source_tree_state)
-    std::string status_output = run_git_command(repo_root, "status --porcelain=v2 -z");
-    if (status_output.empty()) {
-        out_evidence.unavailable_reasons.push_back("git status --porcelain=v2 -z failed or returned empty");
-        if (error) *error = "Failed to get git status";
-        return false;
-    }
+      // Get porcelain v2 status with NUL delimiter (for source_tree_state)
+      printf("  DEBUG collect_current_source_evidence: running git status\n");
+      fflush(stdout);
+      std::string status_output = run_git_command(repo_root, "status --porcelain=v2 -z");
+      printf("  DEBUG collect_current_source_evidence: status_output length=%zu\n", status_output.length());
+      fflush(stdout);
+      if (status_output.empty()) {
+          out_evidence.unavailable_reasons.push_back("git status --porcelain=v2 -z failed or returned empty");
+          if (error) *error = "Failed to get git status";
+          return false;
+      }
 
-    std::vector<std::string> errors;
-    std::string fingerprint = build_canonical_fingerprint(
-        repo_root,
-        head_rev,
-        abi,
-        api_level,
-        configuration,
-        target_triple,
-        ndk_version,
-        compile_args,
-        &errors
-    );
+      std::vector<std::string> errors;
+      std::string fingerprint = build_canonical_fingerprint(
+          repo_root,
+          head_rev,
+          abi,
+          api_level,
+          configuration,
+          target_triple,
+          ndk_version,
+          compile_args,
+          &errors
+      );
 
-    if (!errors.empty()) {
-        out_evidence.unavailable_reasons.insert(out_evidence.unavailable_reasons.end(), errors.begin(), errors.end());
-        out_evidence.status = fang::guest::SourceEvidence::Status::Unavailable;
-        if (error) *error = "Failed to compute canonical fingerprint: " + errors[0];
-        return false;
-    }
+      if (!errors.empty()) {
+          out_evidence.unavailable_reasons.insert(out_evidence.unavailable_reasons.end(), errors.begin(), 
+errors.end());
+          out_evidence.status = fang::guest::SourceEvidence::Status::Unavailable;
+          if (error) *error = "Failed to compute canonical fingerprint: " + errors[0];
+          return false;
+      }
 
-    out_evidence.fingerprint = fingerprint;
-    out_evidence.status = fang::guest::SourceEvidence::Status::Collected;
-    return true;
-}
-
+      out_evidence.fingerprint = fingerprint;
+      out_evidence.status = fang::guest::SourceEvidence::Status::Collected;
+      printf("  DEBUG collect_current_source_evidence: success, fingerprint=%s\n", fingerprint.c_str());
+      fflush(stdout);
+      return true;
+  }
 ProvenanceAssessment GuestDeploymentCoordinator::assess_provenance(
-    const fang::guest::GuestArtifactManifest& manifest,
-    const fang::guest::SourceEvidence& current_evidence,
-    std::string* diagnostic) {
-    // Legacy manifest without provenance fields
-    if (manifest.manifest_schema_version.empty() || 
-        manifest.manifest_schema_version == "stage9-v1" ||
-        manifest.manifest_schema_version == "stage9-v2" ||
-        !manifest.source_evidence.is_collected()) {
-        if (diagnostic) *diagnostic = "Legacy manifest without source evidence; provenance unverified";
-        return ProvenanceAssessment::LegacyUnverified;
-    }
+      const fang::guest::GuestArtifactManifest& manifest,
+      const fang::guest::SourceEvidence& current_evidence,
+      std::string* diagnostic) {
+      std::cerr << "  DEBUG assess_provenance: schema=" << manifest.manifest_schema_version 
+                << " manifest_collected=" << manifest.source_evidence.is_collected()
+                << " current_collected=" << current_evidence.is_collected() << std::endl;
+      fflush(stderr);
+      
+      // Legacy manifest version (stage9-v1 or v2) without provenance fields
+      if (manifest.manifest_schema_version.empty() || 
+          manifest.manifest_schema_version == "stage9-v1" ||
+          manifest.manifest_schema_version == "stage9-v2") {
+          if (diagnostic) *diagnostic = "Legacy manifest without source evidence; provenance unverified";
+          return ProvenanceAssessment::LegacyUnverified;
+      }
 
-    // Check scope and encoding compatibility
-    const std::string expected_scope = "fang-guest-daemon-inputs-v1";
-    const std::string expected_encoding = "fang-cim-c14n-v1";
-    if (manifest.source_evidence.scope != expected_scope || 
-        manifest.source_evidence.encoding != expected_encoding) {
-        if (diagnostic) *diagnostic = "Manifest uses incompatible scope/encoding: " + manifest.source_evidence.scope + "/" + manifest.source_evidence.encoding;
-        return ProvenanceAssessment::LegacyUnverified;
-    }
+      // Manifest has current schema but no source evidence - check current evidence availability
+      if (!manifest.source_evidence.is_collected()) {
+          if (!current_evidence.is_collected()) {
+              if (diagnostic) *diagnostic = "Both manifest and current source evidence unavailable; provenance unverifiable";
+              return ProvenanceAssessment::Unavailable;
+          } else {
+              if (diagnostic) *diagnostic = "Manifest lacks source evidence but current evidence available; treating as unverified";
+              return ProvenanceAssessment::LegacyUnverified;
+          }
+      }
+
+      // Check scope and encoding compatibility
+      const std::string expected_scope = "fang-guest-daemon-inputs-v1";
+      const std::string expected_encoding = "fang-cim-c14n-v1";
+      if (manifest.source_evidence.scope != expected_scope || 
+          manifest.source_evidence.encoding != expected_encoding) {
+          if (diagnostic) *diagnostic = "Manifest uses incompatible scope/encoding: " + manifest.source_evidence.scope 
++ "/" + manifest.source_evidence.encoding;
+          return ProvenanceAssessment::LegacyUnverified;
+      }
 
     // Current evidence unavailable
     if (!current_evidence.is_collected()) {
@@ -985,11 +1135,12 @@ GuestDeploymentReport GuestDeploymentCoordinator::assess_deployment_readiness(co
     std::vector<std::filesystem::path> search_paths;
     if (!target.staging_dir.empty()) {
         search_paths.push_back(std::filesystem::path(target.staging_dir));
+    } else {
+        search_paths.push_back(std::filesystem::path("out/build/Release"));
+        search_paths.push_back(std::filesystem::path("out/build/Debug"));
+        search_paths.push_back(std::filesystem::path("out/staging"));
+        search_paths.push_back(std::filesystem::path("."));
     }
-    search_paths.push_back(std::filesystem::path("out/build/Release"));
-    search_paths.push_back(std::filesystem::path("out/build/Debug"));
-    search_paths.push_back(std::filesystem::path("out/staging"));
-    search_paths.push_back(std::filesystem::path("."));
 
     std::filesystem::path resolved_path;
     for (const auto& dir : search_paths) {
@@ -1145,25 +1296,28 @@ GuestDeploymentReport GuestDeploymentCoordinator::assess_deployment_readiness(co
                 return report;
             }
         }
-
-        // Build configuration consistency.
-        if (!report.manifest.build_configuration.empty() && report.manifest.build_configuration != target.build_config) {
-            report.phase = GuestDeploymentPhase::ArtifactManifestMismatch;
-            report.diagnostic = "Artifact build_configuration (" + report.manifest.build_configuration + ") does not match requested build configuration (" + target.build_config + ").";
-            return report;
-        }
-
-        // Provenance assessment - always assess when manifest is present
-        fang::guest::SourceEvidence current_evidence;
-        std::string prov_diagnostic;
-        std::string repo_root = std::filesystem::current_path().string();
-        
-        // Extract target info from manifest and target
-        std::string abi_str = std::string(fang::guest::guest_target_abi_name(target.abi));
-        std::string target_triple = abi_str + "-linux-android" + std::to_string(target.android_api_level);
-        std::string ndk_version = report.manifest.ndk_version.empty() ? "unknown" : report.manifest.ndk_version;
-        
-        std::vector<std::string> compile_args = {
+// Build configuration consistency.
+          if (!report.manifest.build_configuration.empty() && report.manifest.build_configuration != target.build_config) {
+              report.phase = GuestDeploymentPhase::ArtifactManifestMismatch;
+              report.diagnostic = "Artifact build_configuration (" + report.manifest.build_configuration + ") does not match requested build configuration (" + target.build_config + ").";
+              return report;
+          }
+  
+// Provenance assessment - always assess when manifest is present
+          fang::guest::SourceEvidence current_evidence;
+          std::string prov_diagnostic;
+          // Use the explicitly established repo_root derived from the deployment target staging directory
+          // or from a validated environment/config source.
+          std::string repo_root = target.staging_dir.empty()
+              ? std::filesystem::canonical(std::filesystem::path(__FILE__).parent_path() / ".." / ".." / "..").string()
+              : std::filesystem::canonical(std::filesystem::path(target.staging_dir)).string();
+          
+          // Extract target info from manifest and target
+          std::string abi_str = std::string(fang::guest::guest_target_abi_name(target.abi));
+          std::string target_triple = abi_str + "-linux-android" + std::to_string(target.android_api_level);
+          std::string ndk_version = report.manifest.ndk_version.empty() ? "unknown" : report.manifest.ndk_version;
+          
+          std::vector<std::string> compile_args = {
             "--target=" + target_triple,
             "-std=c++20",
             "-fPIE",
@@ -1172,7 +1326,8 @@ GuestDeploymentReport GuestDeploymentCoordinator::assess_deployment_readiness(co
             "-Wextra",
             "-D__ANDROID__",
             "-I", repo_root + "/apps/fang-input-daemon",
-            "-I", repo_root + "/apps/fang-studio"
+            "-I", repo_root + "/apps/fang-studio",
+            "-static-libstdc++"
         };
         if (target.build_config == "Release") {
             compile_args.push_back("-O2");
@@ -1206,11 +1361,12 @@ GuestDeploymentReport GuestDeploymentCoordinator::assess_deployment_readiness(co
         report.manifest.artifact_size_bytes = std::filesystem::file_size(resolved_path);
         report.manifest.artifact_sha256 = calculate_file_sha256(resolved_path.string());
         report.manifest.build_result = "Success";
-        report.manifest.elf_class = elf_info.elf_class;
-        report.manifest.elf_data = elf_info.data_encoding;
-        report.manifest.elf_machine = std::to_string(elf_info.machine_arch);
+report.manifest.elf_class = elf_info.elf_class;
+          report.manifest.elf_data = elf_info.data_encoding;
+          std::ostringstream hx; hx << "0x" << std::hex << std::uppercase << elf_info.machine_arch;
+          report.manifest.elf_machine = hx.str();
 
-        // Provenance assessment for artifact without manifest
+          // Provenance assessment for artifact without manifest
         // Uses explicit repo_root derived from the deployment target staging directory
         // or from a validated environment/config source.
         fang::guest::SourceEvidence current_evidence;
@@ -1233,7 +1389,8 @@ GuestDeploymentReport GuestDeploymentCoordinator::assess_deployment_readiness(co
             "-Wextra",
             "-D__ANDROID__",
             "-I", repo_root + "/apps/fang-input-daemon",
-            "-I", repo_root + "/apps/fang-studio"
+            "-I", repo_root + "/apps/fang-studio",
+            "-static-libstdc++"
         };
         if (target.build_config == "Release") {
             compile_args.push_back("-O2");
@@ -1349,6 +1506,97 @@ bool GuestDeploymentCoordinator::deploy_to_guest(
     return false;
 }
 
+// Live deployment with explicit configuration
+GuestDeploymentCoordinator::LiveDeploymentResult GuestDeploymentCoordinator::deploy_live(
+    const GuestDeploymentTarget& target, const std::filesystem::path& config_path) {
+    
+    LiveDeploymentResult result;
+    
+    // 1. Load live deployment configuration
+    auto live_config = LiveDeploymentConfig::load_from_file(config_path);
+    if (!live_config.has_value()) {
+        result.success = false;
+        result.error_message = "Live deployment configuration not found or invalid. "
+            "Create .fang-live-config.json with target_serial and authorization_token.";
+        return result;
+    }
+    
+    result.target_serial_used = live_config->target_serial;
+    
+    // 2. Run offline preflight with the loaded configuration
+    auto preflight = run_offline_preflight(
+        target,
+        target.staging_dir,
+        live_config->authorization_token,
+        live_config->target_serial
+    );
+    
+    if (!preflight.all_passed) {
+        result.success = false;
+        result.error_message = "Offline preflight failed: " + preflight.overall_error_code;
+        if (!preflight.checks.empty()) {
+            for (const auto& check : preflight.checks) {
+                if (!check.passed) {
+                    result.error_message += " | " + check.name + ": " + check.diagnostic;
+                }
+            }
+        }
+        return result;
+    }
+    
+    // 3. Create authorized transport
+    AdbTransportConfig transport_config;
+    transport_config.require_explicit_authorization = true;
+    transport_config.authorization_token = live_config->authorization_token;
+    transport_config.target_serial = live_config->target_serial;
+    
+    auto transport = std::make_shared<AdbTransport>(transport_config);
+    transport->set_authorization(live_config->authorization_token);
+    
+    // Verify target connectivity and ABI
+    auto target_validation = transport->validate_target(live_config->target_serial, target.abi);
+    if (!target_validation.success) {
+        result.success = false;
+        result.error_message = "Target validation failed: " + target_validation.error_code + 
+            " | " + target_validation.diagnostic;
+        return result;
+    }
+    
+    // 4. Set transport and deploy
+    set_transport(transport);
+    
+    GuestDeploymentReport report;
+    bool deploy_success = deploy_to_guest(live_config->target_serial, target, report);
+    result.report = report;
+    
+    if (!deploy_success) {
+        result.success = false;
+        result.error_message = "Deployment failed: " + report.diagnostic;
+        return result;
+    }
+    
+    // 5. Verify remote artifact integrity
+    auto verify_result = transport->verify_remote_artifact(
+        live_config->target_serial,
+        target.guest_install_path,
+        report.artifact_size_bytes,
+        report.artifact_sha256
+    );
+    
+    if (!verify_result.success) {
+        result.success = false;
+        result.error_message = "Remote artifact verification failed: " + verify_result.error_code + 
+            " | " + verify_result.diagnostic;
+        // Attempt cleanup
+        teardown_guest_deployment(live_config->target_serial, report);
+        return result;
+    }
+    
+    result.artifact_sha256_pushed = report.artifact_sha256;
+    result.success = true;
+    return result;
+}
+
 void GuestDeploymentCoordinator::teardown_guest_deployment(
     const std::string& /*serial_or_avd*/,
     GuestDeploymentReport& report) {
@@ -1398,20 +1646,20 @@ std::string error_code_for_provenance(ProvenanceAssessment assessment) {
 } // anonymous namespace
 
 DeploymentPlan GuestDeploymentCoordinator::create_deployment_plan(const GuestDeploymentReport& readiness_report) {
-    DeploymentPlan plan;
-    plan.created_at = std::chrono::system_clock::now();
-
-    // Only create a deployment plan if the artifact is ready
-    if (readiness_report.phase != GuestDeploymentPhase::ArtifactReady) {
-        plan.has_failures = true;
-        plan.overall_error_code = error_code_for_phase(readiness_report.phase);
-        plan.is_complete = true;
-        plan.completed_at = std::chrono::system_clock::now();
-        return plan;
-    }
-
-    // Check provenance - if legacy or unavailable, we can still deploy but mark it
-    std::string provenance_error = error_code_for_provenance(readiness_report.provenance_assessment);
+      DeploymentPlan plan;
+      plan.created_at = std::chrono::system_clock::now();
+  
+      // Only create a deployment plan if the artifact is ready
+      if (readiness_report.phase != GuestDeploymentPhase::ArtifactReady) {
+          plan.has_failures = true;
+          plan.overall_error_code = error_code_for_phase(readiness_report.phase);
+          plan.is_complete = true;
+          plan.completed_at = std::chrono::system_clock::now();
+          return plan;
+      }
+  
+      // Check provenance - if legacy or unavailable, we can still deploy but mark it
+      std::string provenance_error = error_code_for_provenance(readiness_report.provenance_assessment);
 
     // Step 1: ValidateArtifact - already done in readiness assessment, but we include it for completeness
     plan.steps.push_back(make_step(DeploymentPlanStepType::ValidateArtifact, true));
@@ -1430,14 +1678,14 @@ DeploymentPlan GuestDeploymentCoordinator::create_deployment_plan(const GuestDep
         plan.steps.back().diagnostic = "No companion manifest present; artifact validated by ELF inspection only";
     }
 
-    // Step 3: CheckProvenance
-    plan.steps.push_back(make_step(DeploymentPlanStepType::CheckProvenance, true));
-    if (readiness_report.provenance_assessment == ProvenanceAssessment::QualifiedCurrent ||
-        readiness_report.provenance_assessment == ProvenanceAssessment::QualifiedDirty) {
-        plan.steps.back().status = DeploymentPlanStepStatus::Completed;
-        plan.steps.back().started_at = plan.created_at;
-        plan.steps.back().completed_at = plan.created_at;
-    } else if (readiness_report.provenance_assessment == ProvenanceAssessment::LegacyUnverified) {
+// Step 3: CheckProvenance
+      plan.steps.push_back(make_step(DeploymentPlanStepType::CheckProvenance, true));
+      if (readiness_report.provenance_assessment == ProvenanceAssessment::QualifiedCurrent ||
+          readiness_report.provenance_assessment == ProvenanceAssessment::QualifiedDirty) {
+          plan.steps.back().status = DeploymentPlanStepStatus::Completed;
+          plan.steps.back().started_at = plan.created_at;
+          plan.steps.back().completed_at = plan.created_at;
+      } else if (readiness_report.provenance_assessment == ProvenanceAssessment::LegacyUnverified) {
         // Legacy provenance is not a blocker - mark as completed but note it in diagnostic
         plan.steps.back().status = DeploymentPlanStepStatus::Completed;
         plan.steps.back().started_at = plan.created_at;

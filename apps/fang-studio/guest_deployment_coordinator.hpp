@@ -10,6 +10,7 @@
 #include <vector>
 #include <optional>
 #include <chrono>
+#include <filesystem>
 
 namespace fang::studio {
 
@@ -71,6 +72,21 @@ struct GuestDeploymentTarget {
     uint32_t android_api_level{26};
     bool require_privileged_backend{false};
     uint16_t guest_port{24800};
+};
+
+// Local live deployment configuration (loaded from .fang-live-config.json, not committed to git)
+struct LiveDeploymentConfig {
+    std::string target_serial;           // Explicit ADB target serial (e.g., "emulator-5554")
+    std::string authorization_token;     // Authorization token for live ADB operations
+    std::string config_version = "1.0";  // Config schema version
+    
+    bool is_valid() const noexcept {
+        return !target_serial.empty() && !authorization_token.empty();
+    }
+    
+    static std::optional<LiveDeploymentConfig> load_from_file(const std::filesystem::path& config_path);
+    static std::filesystem::path default_config_path();
+    void save_to_file(const std::filesystem::path& config_path) const;
 };
 
 enum class DeploymentPlanStepType : uint8_t {
@@ -217,6 +233,17 @@ public:
         const std::string& serial_or_avd,
         const GuestDeploymentTarget& target,
         GuestDeploymentReport& out_report) override;
+    
+    // Live deployment with explicit configuration (loads config, validates target, runs preflight, deploys)
+    struct LiveDeploymentResult {
+        bool success{false};
+        GuestDeploymentReport report;
+        std::string error_message;
+        std::string target_serial_used;
+        std::string artifact_sha256_pushed;
+    };
+    
+    LiveDeploymentResult deploy_live(const GuestDeploymentTarget& target, const std::filesystem::path& config_path = {});
     void teardown_guest_deployment(
         const std::string& serial_or_avd,
         GuestDeploymentReport& report) override;

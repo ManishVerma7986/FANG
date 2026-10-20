@@ -79,6 +79,11 @@ struct TransportResult {
     std::string error_code;
     std::string diagnostic;
     std::string detail;
+    std::optional<std::uint32_t> exit_code;
+    std::string stdout_output;
+    std::string stderr_output;
+    bool stdout_truncated{false};
+    bool stderr_truncated{false};
     // Deployment lifecycle state
     enum class LifecycleState {
         LaunchRequested,

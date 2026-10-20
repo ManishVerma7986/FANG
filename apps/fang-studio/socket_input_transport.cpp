@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <iostream>
 #include <sstream>
 
 #if defined(_WIN32)
@@ -122,6 +123,9 @@ SocketInputTransport::SocketInputTransport(
     , local_port_(local_port)
     , remote_port_(remote_port) {
     ensure_network_subsystem();
+    if (socket_ != static_cast<uintptr_t>(k_invalid_sock)) {
+        configure_socket(socket_);
+    }
 }
 
 SocketInputTransport::~SocketInputTransport() {
@@ -267,10 +271,12 @@ bool SocketInputTransport::is_connected() const noexcept {
 }
 
 bool SocketInputTransport::drain_send_queue_locked() {
-    auto s = static_cast<sock_handle_t>(socket_);
-    if (s == k_invalid_sock || send_queue_.empty()) {
-        return true;
-    }
+      auto s = static_cast<sock_handle_t>(socket_);
+      std::cerr << "[DEBUG drain] entry state=" << static_cast<int>(state_) << " socket=" << socket_ << " queue_size=" << send_queue_.size() << std::endl;
+      if (s == k_invalid_sock || send_queue_.empty()) {
+          std::cerr << "[DEBUG drain] empty queue or invalid sock, returning true" << std::endl;
+          return true;
+      }
 
     // Flatten contiguous chunk from deque
     std::vector<std::byte> chunk;
@@ -280,8 +286,9 @@ bool SocketInputTransport::drain_send_queue_locked() {
         send_queue_.pop_front();
     }
 
-    int sent = ::send(s, reinterpret_cast<const char*>(chunk.data()), static_cast<int>(chunk.size()), 0);
-    if (sent > 0) {
+int sent = ::send(s, reinterpret_cast<const char*>(chunk.data()), static_cast<int>(chunk.size()), 0);
+      std::cerr << "[DEBUG drain] send returned " << sent << " errno=" << (sent == k_sock_err ? get_last_net_error() : 0) << std::endl;
+      if (sent > 0) {
         total_bytes_sent_ += static_cast<uint64_t>(sent);
         if (static_cast<std::size_t>(sent) < chunk.size()) {
             // Push unsent portion back to the front of send_queue_
@@ -292,42 +299,51 @@ bool SocketInputTransport::drain_send_queue_locked() {
         return true;
     }
 
-    if (sent == k_sock_err) {
-        int err = get_last_net_error();
-        if (is_would_block_error(err)) {
-            // Socket buffer full; restore popped chunk
-            for (auto it = chunk.rbegin(); it != chunk.rend(); ++it) {
-                send_queue_.push_front(*it);
-            }
-            return true;
-        }
+if (sent == k_sock_err) {
+          int err = get_last_net_error();
+          std::cerr << "[DEBUG drain] send error err=" << err << std::endl;
+          if (is_would_block_error(err)) {
+              // Socket buffer full; restore popped chunk
+              for (auto it = chunk.rbegin(); it != chunk.rend(); ++it) {
+                  send_queue_.push_front(*it);
+              }
+              std::cerr << "[DEBUG drain] would block, restored queue, size=" << send_queue_.size() << std::endl;
+              return true;
+          }
 
-        if (is_conn_reset_error(err)) {
-            last_error_ = SocketTransportError::ConnectionReset;
-            last_error_msg_ = "Connection reset by peer during drain.";
-        } else {
-            last_error_ = SocketTransportError::OsError;
-            last_error_msg_ = "Send error: " + std::to_string(err);
-        }
-        close_socket_internal();
-        state_ = SocketTransportState::Faulted;
-        return false;
-    }
+          if (is_conn_reset_error(err)) {
+              std::cerr << "[DEBUG drain] connection reset" << std::endl;
+              last_error_ = SocketTransportError::ConnectionReset;
+              last_error_msg_ = "Connection reset by peer during drain.";
+          } else {
+              std::cerr << "[DEBUG drain] OS error" << std::endl;
+              last_error_ = SocketTransportError::OsError;
+              last_error_msg_ = "Send error: " + std::to_string(err);
+          }
+          close_socket_internal();
+          state_ = SocketTransportState::Faulted;
+          return false;
+      }
 
     return true;
 }
 
 bool SocketInputTransport::send_bytes(std::span<const std::byte> bytes) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (state_ != SocketTransportState::Connected || socket_ == static_cast<uintptr_t>(k_invalid_sock)) {
-        last_error_ = SocketTransportError::NotConnected;
-        return false;
-    }
+      std::lock_guard<std::mutex> lock(mutex_);
+      std::cerr << "[DEBUG send_bytes] entry state=" << static_cast<int>(state_) << " socket=" << socket_ << " bytes=" << bytes.size() << std::endl;
+      if (state_ != SocketTransportState::Connected || socket_ == static_cast<uintptr_t>(k_invalid_sock)) {
+          std::cerr << "[DEBUG send_bytes] Not connected! state=" << static_cast<int>(state_) << std::endl;
+          last_error_ = SocketTransportError::NotConnected;
+          return false;
+      }
 
-    // Drain pending bytes first
-    if (!drain_send_queue_locked()) {
-        return false;
-    }
+      // Drain pending bytes first
+      std::cerr << "[DEBUG send_bytes] Calling drain_send_queue_locked" << std::endl;
+      if (!drain_send_queue_locked()) {
+          std::cerr << "[DEBUG send_bytes] drain_send_queue_locked failed" << std::endl;
+          return false;
+      }
+      std::cerr << "[DEBUG send_bytes] drain_send_queue_locked returned true" << std::endl;
 
     // Bounded queue backpressure protection
     if (send_queue_.size() + bytes.size() > config_.max_send_queue_bytes) {
@@ -383,7 +399,9 @@ bool SocketInputTransport::send_bytes(std::span<const std::byte> bytes) {
 
 std::vector<std::byte> SocketInputTransport::receive_bytes(std::size_t max_bytes) {
     std::lock_guard<std::mutex> lock(mutex_);
+    std::cerr << "[DEBUG receive_bytes] entry state=" << static_cast<int>(state_) << " socket=" << socket_ << std::endl;
     if (state_ != SocketTransportState::Connected || socket_ == static_cast<uintptr_t>(k_invalid_sock)) {
+        std::cerr << "[DEBUG receive_bytes] not connected, returning empty" << std::endl;
         return {};
     }
 
@@ -395,6 +413,17 @@ std::vector<std::byte> SocketInputTransport::receive_bytes(std::size_t max_bytes
     std::vector<std::byte> buf(read_limit);
 
     int received = ::recv(s, reinterpret_cast<char*>(buf.data()), static_cast<int>(buf.size()), 0);
+
+    // DEBUG
+    static uint64_t recv_call_count = 0;
+    recv_call_count++;
+    if (recv_call_count % 100000 == 0) {
+        int err = get_last_net_error();
+        std::cerr << "[DEBUG SocketInputTransport::receive_bytes] call=" << recv_call_count 
+                  << " received=" << received << " err=" << err 
+                  << " state=" << static_cast<int>(state_) << std::endl;
+    }
+
     if (received > 0) {
         buf.resize(static_cast<std::size_t>(received));
         total_bytes_received_ += static_cast<uint64_t>(received);
@@ -618,6 +647,9 @@ std::shared_ptr<SocketInputTransport> SocketInputServer::accept_client(uint32_t 
         return nullptr;
     }
 
+    // DEBUG
+    std::cerr << "[DEBUG accept] client_sock=" << client_sock << " remote_port=" << ntohs(client_addr.sin_port) << std::endl;
+
     // Configure accepted client socket
     set_sock_nonblocking(client_sock);
     int flag = 1;
@@ -628,8 +660,14 @@ std::shared_ptr<SocketInputTransport> SocketInputServer::accept_client(uint32_t 
     cfg.host = bind_address_;
     cfg.port = bound_port_;
 
-    return std::make_shared<SocketInputTransport>(
+    auto transport = std::make_shared<SocketInputTransport>(
         static_cast<uintptr_t>(client_sock), cfg, bound_port_, remote_p);
+    
+    // DEBUG
+    std::cerr << "[DEBUG accept] transport_created state=" << static_cast<int>(transport->state()) 
+              << " connected=" << transport->is_connected() << std::endl;
+
+    return transport;
 }
 
 SocketTransportError SocketInputServer::last_error() const noexcept {

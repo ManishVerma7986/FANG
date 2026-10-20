@@ -423,6 +423,29 @@ if(BUILD_TESTING)
         apps/fang-studio/guest_deployment_coordinator.cpp
     )
 
+    add_executable(fang-fake-adb-process
+        tests/unit/fake_adb_process.cpp
+    )
+    set_target_properties(fang-fake-adb-process PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/fake adb/bin with spaces/$<CONFIG>"
+    )
+
+    add_executable(fang-adb-process-tests
+        tests/unit/adb_process_tests.cpp
+        apps/fang-studio/guest_endpoint_forwarder.cpp
+        apps/fang-studio/socket_input_transport.cpp
+        apps/fang-studio/input_ipc_protocol.cpp
+    )
+    target_include_directories(fang-adb-process-tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-studio"
+        "${CMAKE_CURRENT_SOURCE_DIR}/apps/fang-input-daemon"
+    )
+    target_link_libraries(fang-adb-process-tests PRIVATE fang_warnings Ws2_32)
+    add_dependencies(fang-adb-process-tests fang-fake-adb-process)
+    add_test(NAME adb-process-unit
+        COMMAND fang-adb-process-tests "$<TARGET_FILE:fang-fake-adb-process>"
+    )
+
     add_executable(fang-canonical-encoder-tests
         tests/unit/canonical_encoder_tests.cpp
     )

@@ -1,0 +1,20 @@
+host-timing-unit 0 0
+core-unit 0 0
+runtime-backend-unit 0 0
+runtime-broker-unit 0 0
+runtime-broker-native-unit 0 0
+runtime-supervisor-native-unit 0 0
+video-smoke-offline-unit 0 0
+host-timing-rejects-zero-duration 0 0
+studio-gui-smoke 0 0
+studio-window-selection-unit 0 0
+studio-player-unit 0 0
+studio-video-unit 0 0
+guest-daemon-unit 4 0.00726782
+socket-transport-unit 4 0.0687123
+canonical-encoder-unit 4 0.00493645
+stage9-runtime-unit 3 0
+android-gles-result-contract 5 0.328482
+android-animated-gles-result-contract 5 0.394686
+guest-daemon-build-pipeline-contract 5 8.89138
+---

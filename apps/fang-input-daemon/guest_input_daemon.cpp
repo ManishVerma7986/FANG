@@ -1,6 +1,7 @@
 #include "guest_input_daemon.hpp"
 
 #include <algorithm>
+#include <iostream>
 #include <sstream>
 
 namespace fang::guest {
@@ -75,6 +76,17 @@ GuestInputDaemon::DaemonState GuestInputDaemon::state() const noexcept {
 std::size_t GuestInputDaemon::poll_and_process(uint64_t current_time_ms) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
 
+    // DEBUG
+    static uint64_t poll_call_count = 0;
+    poll_call_count++;
+    if (poll_call_count % 1000000 == 0) {
+        bool trans_connected = transport_ ? transport_->is_connected() : false;
+        std::cerr << "[DEBUG poll] call=" << poll_call_count 
+                  << " state=" << static_cast<int>(state_)
+                  << " transport_connected=" << trans_connected
+                  << std::endl;
+    }
+
     // 1. Heartbeat timeout check
     if (current_time_ms > 0 && last_packet_time_ms_ > 0 && state_ == DaemonState::Active) {
         if (config_.heartbeat_timeout_ms > 0 &&
@@ -91,23 +103,27 @@ std::size_t GuestInputDaemon::poll_and_process(uint64_t current_time_ms) {
         }
     }
 
-    if (!transport_ || !transport_->is_connected()) {
-        if (state_ == DaemonState::Active) {
-            if (backend_) {
-                backend_->cancel_all_contacts_and_keys();
-            }
-            active_contacts_.fill(false);
-            held_keys_.clear();
-            state_ = DaemonState::Disconnected;
-        }
-        return 0;
-    }
+if (!transport_ || !transport_->is_connected()) {
+          std::cerr << "[DEBUG poll] transport not connected! transport_=" << (transport_ ? "valid" : "null") 
+                    << " is_connected=" << (transport_ ? transport_->is_connected() : false) << std::endl;
+          if (state_ == DaemonState::Active) {
+              if (backend_) {
+                  backend_->cancel_all_contacts_and_keys();
+              }
+              active_contacts_.fill(false);
+              held_keys_.clear();
+              state_ = DaemonState::Disconnected;
+          }
+          return 0;
+      }
 
     // 2. Fetch bytes from transport
-    auto incoming = transport_->receive_bytes(4096);
-    if (!incoming.empty()) {
-        receive_buffer_.insert(receive_buffer_.end(), incoming.begin(), incoming.end());
-    }
+auto incoming = transport_->receive_bytes(4096);
+      if (!incoming.empty()) {
+          // DEBUG
+          std::cerr << "[DEBUG recv] received " << incoming.size() << " bytes, buffer was " << receive_buffer_.size() << std::endl;
+          receive_buffer_.insert(receive_buffer_.end(), incoming.begin(), incoming.end());
+      }
 
     if (receive_buffer_.size() > config_.max_buffer_bytes) {
         receive_buffer_.clear();
@@ -116,29 +132,40 @@ std::size_t GuestInputDaemon::poll_and_process(uint64_t current_time_ms) {
         return 0;
     }
 
-    // 3. Process framed packets
-    std::size_t processed_count = 0;
-    while (receive_buffer_.size() >= input_wire_header_size) {
-        WireHeader header;
-        const auto err = decode_wire_header(
-            std::span<const std::byte>(receive_buffer_.data(), input_wire_header_size), header);
+// 3. Process framed packets
+      std::size_t processed_count = 0;
+      while (receive_buffer_.size() >= input_wire_header_size) {
+          WireHeader header;
+          const auto err = decode_wire_header(
+              std::span<const std::byte>(receive_buffer_.data(), input_wire_header_size), header);
 
-        if (err == InputProtocolError::InvalidMagic) {
-            receive_buffer_.erase(receive_buffer_.begin());
-            continue;
-        }
+          // DEBUG
+          std::cerr << "[DEBUG msg] buffer_size=" << receive_buffer_.size()
+                    << " err=" << static_cast<int>(err)
+                    << " magic=0x" << std::hex << std::uppercase << header.magic
+                    << std::dec << " version=" << header.version
+                    << " type=" << static_cast<int>(header.type)
+                    << " payload_size=" << header.payload_size
+                    << " seq=" << header.sequence_number << std::endl;
 
-        if (err != InputProtocolError::None) {
-            if (err == InputProtocolError::UnsupportedVersion ||
-                err == InputProtocolError::UnknownMessageType ||
-                err == InputProtocolError::OversizedPayload) {
-                send_error(0, err, "Header decode error: " + std::string(input_protocol_error_name(err)));
-                state_ = DaemonState::Error;
-                last_error_ = err;
-            }
-            receive_buffer_.erase(receive_buffer_.begin());
-            continue;
-        }
+          if (err == InputProtocolError::InvalidMagic) {
+              std::cerr << "[DEBUG msg] InvalidMagic, erasing 1 byte" << std::endl;
+              receive_buffer_.erase(receive_buffer_.begin());
+              continue;
+          }
+
+          if (err != InputProtocolError::None) {
+              std::cerr << "[DEBUG msg] Header decode error: " << static_cast<int>(err) << std::endl;
+              if (err == InputProtocolError::UnsupportedVersion ||
+                  err == InputProtocolError::UnknownMessageType ||
+                  err == InputProtocolError::OversizedPayload) {
+                  send_error(0, err, "Header decode error: " + std::string(input_protocol_error_name(err)));
+                  state_ = DaemonState::Error;
+                  last_error_ = err;
+              }
+              receive_buffer_.erase(receive_buffer_.begin());
+              continue;
+          }
 
         if (header.payload_size > input_maximum_payload_size) {
             send_error(header.sequence_number, InputProtocolError::OversizedPayload, "Payload exceeds 4096 bytes");
@@ -198,75 +225,91 @@ std::size_t GuestInputDaemon::poll_and_process(uint64_t current_time_ms) {
 
     return processed_count;
 }
-
 void GuestInputDaemon::handle_hello(const WireHeader& header, std::span<const std::byte> payload) {
-    InputProtocolError parse_err = InputProtocolError::None;
-    auto hello = decode_hello_message(payload, parse_err);
-    if (!hello.has_value()) {
-        send_error(header.sequence_number, parse_err, "Failed to decode Hello message.");
-        state_ = DaemonState::Error;
-        last_error_ = parse_err;
-        return;
-    }
+      std::cerr << "[DEBUG handle_hello] called with seq=" << header.sequence_number << std::endl;
+      InputProtocolError parse_err = InputProtocolError::None;
+      auto hello = decode_hello_message(payload, parse_err);
+      if (!hello.has_value()) {
+          std::cerr << "[DEBUG handle_hello] decode_hello_message failed: " << static_cast<int>(parse_err) << std::endl;
+          send_error(header.sequence_number, parse_err, "Failed to decode Hello message.");
+          state_ = DaemonState::Error;
+          last_error_ = parse_err;
+          return;
+      }
 
-    if (hello->generation_id != config_.expected_generation_id) {
-        state_ = DaemonState::Error;
-        last_error_ = InputProtocolError::StaleGeneration;
-        diagnostic_msg_ = "Generation ID mismatch: expected " + config_.expected_generation_id + ", got " + hello->generation_id;
+      std::cerr << "[DEBUG handle_hello] session_id=" << hello->session_id << " expected=" << config_.expected_session_id << std::endl;
+      std::cerr << "[DEBUG handle_hello] generation_id=" << hello->generation_id << " expected=" << config_.expected_generation_id << std::endl;
 
-        HelloAckPayload ack;
-        ack.guest_version = input_protocol_version;
-        ack.status = InputProtocolError::StaleGeneration;
-        ack.max_contacts = 0;
-        ack.supported_caps = 0;
-        ack.session_id = hello->session_id;
-        ack.generation_id = config_.expected_generation_id;
-        auto pkt = encode_hello_ack_message(header.sequence_number, header.timestamp_ms, ack);
-        transport_->send_bytes(pkt);
-        return;
-    }
+      if (hello->generation_id != config_.expected_generation_id) {
+          std::cerr << "[DEBUG handle_hello] Generation ID mismatch" << std::endl;
+          state_ = DaemonState::Error;
+          last_error_ = InputProtocolError::StaleGeneration;
+          diagnostic_msg_ = "Generation ID mismatch: expected " + config_.expected_generation_id + ", got " + 
+hello->generation_id;
 
-    if (hello->session_id != config_.expected_session_id) {
-        state_ = DaemonState::Error;
-        last_error_ = InputProtocolError::SessionMismatch;
-        diagnostic_msg_ = "Session ID mismatch: expected " + config_.expected_session_id + ", got " + hello->session_id;
+          HelloAckPayload ack;
+          ack.guest_version = input_protocol_version;
+          ack.status = InputProtocolError::StaleGeneration;
+          ack.max_contacts = 0;
+          ack.supported_caps = 0;
+          ack.session_id = hello->session_id;
+          ack.generation_id = config_.expected_generation_id;
+          auto pkt = encode_hello_ack_message(header.sequence_number, header.timestamp_ms, ack);
+          std::cerr << "[DEBUG handle_hello] Sending StaleGeneration HelloAck" << std::endl;
+          transport_->send_bytes(pkt);
+          return;
+      }
 
-        HelloAckPayload ack;
-        ack.guest_version = input_protocol_version;
-        ack.status = InputProtocolError::SessionMismatch;
-        ack.max_contacts = 0;
-        ack.supported_caps = 0;
-        ack.session_id = config_.expected_session_id;
-        ack.generation_id = config_.expected_generation_id;
-        auto pkt = encode_hello_ack_message(header.sequence_number, header.timestamp_ms, ack);
-        transport_->send_bytes(pkt);
-        return;
-    }
+      if (hello->session_id != config_.expected_session_id) {
+          std::cerr << "[DEBUG handle_hello] Session ID mismatch" << std::endl;
+          state_ = DaemonState::Error;
+          last_error_ = InputProtocolError::SessionMismatch;
+          diagnostic_msg_ = "Session ID mismatch: expected " + config_.expected_session_id + ", got " + 
+hello->session_id;
 
-    config_.display_width = hello->display_width;
-    config_.display_height = hello->display_height;
-    negotiated_max_contacts_ = std::min({config_.max_contacts, 10u, input_max_simultaneous_contacts});
+          HelloAckPayload ack;
+          ack.guest_version = input_protocol_version;
+          ack.status = InputProtocolError::SessionMismatch;
+          ack.max_contacts = 0;
+          ack.supported_caps = 0;
+          ack.session_id = config_.expected_session_id;
+          ack.generation_id = config_.expected_generation_id;
+          auto pkt = encode_hello_ack_message(header.sequence_number, header.timestamp_ms, ack);
+          std::cerr << "[DEBUG handle_hello] Sending SessionMismatch HelloAck" << std::endl;
+          transport_->send_bytes(pkt);
+          return;
+      }
 
-    if (backend_) {
-        backend_->initialize(config_.display_width, config_.display_height, negotiated_max_contacts_);
-    }
+      std::cerr << "[DEBUG handle_hello] IDs match, initializing backend" << std::endl;
+      config_.display_width = hello->display_width;
+      config_.display_height = hello->display_height;
+      negotiated_max_contacts_ = std::min({config_.max_contacts, 10u, input_max_simultaneous_contacts});
 
-    HelloAckPayload ack;
-    ack.guest_version = input_protocol_version;
-    ack.status = InputProtocolError::None;
-    ack.max_contacts = negotiated_max_contacts_;
-    ack.supported_caps = backend_ ? backend_->supported_capabilities() : 0;
-    ack.session_id = config_.expected_session_id;
-    ack.generation_id = config_.expected_generation_id;
+      if (backend_) {
+          std::cerr << "[DEBUG handle_hello] Calling backend_->initialize" << std::endl;
+          backend_->initialize(config_.display_width, config_.display_height, negotiated_max_contacts_);
+          std::cerr << "[DEBUG handle_hello] backend_->initialize done" << std::endl;
+      }
 
-    auto pkt = encode_hello_ack_message(header.sequence_number, header.timestamp_ms, ack);
-    transport_->send_bytes(pkt);
-    state_ = DaemonState::Active;
-    last_error_ = InputProtocolError::None;
-    last_acked_seq_ = header.sequence_number;
-    ++total_acks_sent_;
-}
+      HelloAckPayload ack;
+      ack.guest_version = input_protocol_version;
+      ack.status = InputProtocolError::None;
+      ack.max_contacts = negotiated_max_contacts_;
+      ack.supported_caps = backend_ ? backend_->supported_capabilities() : 0;
+      ack.session_id = config_.expected_session_id;
+      ack.generation_id = config_.expected_generation_id;
 
+      std::cerr << "[DEBUG handle_hello] Sending HelloAck, ack.max_contacts=" << ack.max_contacts << " ack.supported_caps=" << ack.supported_caps << std::endl;
+      auto pkt = encode_hello_ack_message(header.sequence_number, header.timestamp_ms, ack);
+      std::cerr << "[DEBUG handle_hello] Calling transport_->send_bytes" << std::endl;
+      transport_->send_bytes(pkt);
+      std::cerr << "[DEBUG handle_hello] send_bytes returned" << std::endl;
+      state_ = DaemonState::Active;
+      last_error_ = InputProtocolError::None;
+      last_acked_seq_ = header.sequence_number;
+      ++total_acks_sent_;
+      std::cerr << "[DEBUG handle_hello] Done, state=Active" << std::endl;
+  }
 void GuestInputDaemon::handle_touch_frame(const WireHeader& header, std::span<const std::byte> payload) {
     if (state_ != DaemonState::Active) {
         send_error(header.sequence_number, InputProtocolError::ConnectionClosed, "Daemon is not active.");

@@ -1,11 +1,34 @@
 #include "input_ipc_protocol.hpp"
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#endif
 #include <cmath>
+#include <cstdint>
 #include <cstring>
+#include <iostream>
 
 namespace fang::studio {
 
 namespace {
+
+// htonll/ntohll for 64-bit network byte order conversion
+static inline uint64_t htonll_impl(uint64_t val) {
+    static const uint16_t test = 0x0102;
+    if (*reinterpret_cast<const uint8_t*>(&test) == 0x01) {
+        // Big-endian host - no conversion needed
+        return val;
+    }
+    // Little-endian host - swap bytes
+    return ((uint64_t)htonl(static_cast<uint32_t>(val)) << 32) | htonl(static_cast<uint32_t>(val >> 32));
+}
+
+static inline uint64_t ntohll_impl(uint64_t val) {
+    return htonll_impl(val); // Symmetric operation
+}
 
 template <typename T>
 void write_val(std::vector<std::byte>& buf, const T& val) {
@@ -24,7 +47,7 @@ bool read_val(std::span<const std::byte>& span, T& val) noexcept {
 }
 
 void write_string(std::vector<std::byte>& buf, std::string_view str, std::size_t max_len) {
-    const uint32_t len = static_cast<uint32_t>(std::min(str.size(), max_len));
+    const uint32_t len = static_cast<uint32_t>((std::min)(str.size(), max_len));
     write_val(buf, len);
     for (size_t i = 0; i < len; ++i) {
         buf.push_back(static_cast<std::byte>(str[i]));
@@ -65,57 +88,86 @@ std::vector<std::byte> build_wire_packet(
 }
 
 } // namespace
-
 std::array<std::byte, input_wire_header_size> encode_wire_header(const WireHeader& header) noexcept {
-    std::array<std::byte, input_wire_header_size> bytes{};
-    auto* dst = bytes.data();
+      std::array<std::byte, input_wire_header_size> bytes{};
+      auto* dst = bytes.data();
 
-    std::memcpy(dst + 0, &header.magic, 4);
-    std::memcpy(dst + 4, &header.version, 2);
-    const uint16_t msg_type = static_cast<uint16_t>(header.type);
-    std::memcpy(dst + 6, &msg_type, 2);
-    std::memcpy(dst + 8, &header.sequence_number, 8);
-    std::memcpy(dst + 16, &header.timestamp_ms, 8);
-    std::memcpy(dst + 24, &header.payload_size, 4);
-    std::memcpy(dst + 28, &header.status_or_flags, 4);
+      // Write in network byte order (big-endian)
+      uint32_t magic_be = htonl(header.magic);
+      std::memcpy(dst + 0, &magic_be, 4);
 
-    return bytes;
-}
+      uint16_t version_be = htons(header.version);
+      std::memcpy(dst + 4, &version_be, 2);
 
-InputProtocolError decode_wire_header(std::span<const std::byte> bytes, WireHeader& out_header) noexcept {
-    if (bytes.size() < input_wire_header_size) {
-        return InputProtocolError::TruncatedHeader;
-    }
+      uint16_t type_be = htons(static_cast<uint16_t>(header.type));
+      std::memcpy(dst + 6, &type_be, 2);
 
-    const auto* src = bytes.data();
-    std::memcpy(&out_header.magic, src + 0, 4);
-    if (out_header.magic != input_protocol_magic) {
-        return InputProtocolError::InvalidMagic;
-    }
+      uint64_t seq_be = htonll_impl(header.sequence_number);
+      std::memcpy(dst + 8, &seq_be, 8);
 
-    std::memcpy(&out_header.version, src + 4, 2);
-    if (out_header.version != input_protocol_version) {
-        return InputProtocolError::UnsupportedVersion;
-    }
+      uint64_t timestamp_be = htonll_impl(header.timestamp_ms);
+      std::memcpy(dst + 16, &timestamp_be, 8);
 
-    uint16_t raw_type = 0;
-    std::memcpy(&raw_type, src + 6, 2);
-    if (raw_type < static_cast<uint16_t>(InputMessageType::Hello) ||
-        raw_type > static_cast<uint16_t>(InputMessageType::Error)) {
-        return InputProtocolError::UnknownMessageType;
-    }
-    out_header.type = static_cast<InputMessageType>(raw_type);
+      uint32_t payload_size_be = htonl(header.payload_size);
+      std::memcpy(dst + 24, &payload_size_be, 4);
 
-    std::memcpy(&out_header.sequence_number, src + 8, 8);
-    std::memcpy(&out_header.timestamp_ms, src + 16, 8);
-    std::memcpy(&out_header.payload_size, src + 24, 4);
-    if (out_header.payload_size > input_maximum_payload_size) {
-        return InputProtocolError::OversizedPayload;
-    }
+      uint32_t status_be = htonl(header.status_or_flags);
+      std::memcpy(dst + 28, &status_be, 4);
 
-    std::memcpy(&out_header.status_or_flags, src + 28, 4);
-    return InputProtocolError::None;
-}
+      return bytes;
+  }
+
+  InputProtocolError decode_wire_header(std::span<const std::byte> bytes, WireHeader& out_header) noexcept {
+      if (bytes.size() < input_wire_header_size) {
+          return InputProtocolError::TruncatedHeader;
+      }
+
+      const auto* src = bytes.data();
+
+      uint32_t magic_be;
+      std::memcpy(&magic_be, src + 0, 4);
+      out_header.magic = ntohl(magic_be);
+      if (out_header.magic != input_protocol_magic) {
+          return InputProtocolError::InvalidMagic;
+      }
+
+      uint16_t version_be;
+      std::memcpy(&version_be, src + 4, 2);
+      out_header.version = ntohs(version_be);
+      if (out_header.version != input_protocol_version) {
+          return InputProtocolError::UnsupportedVersion;
+      }
+
+      uint16_t raw_type_be;
+      std::memcpy(&raw_type_be, src + 6, 2);
+      uint16_t raw_type = ntohs(raw_type_be);
+      if (raw_type < static_cast<uint16_t>(InputMessageType::Hello) ||
+          raw_type > static_cast<uint16_t>(InputMessageType::Error)) {
+          return InputProtocolError::UnknownMessageType;
+      }
+      out_header.type = static_cast<InputMessageType>(raw_type);
+
+      uint64_t seq_be;
+      std::memcpy(&seq_be, src + 8, 8);
+      out_header.sequence_number = ntohll_impl(seq_be);
+
+      uint64_t timestamp_be;
+      std::memcpy(&timestamp_be, src + 16, 8);
+      out_header.timestamp_ms = ntohll_impl(timestamp_be);
+
+      uint32_t payload_size_be;
+      std::memcpy(&payload_size_be, src + 24, 4);
+      out_header.payload_size = ntohl(payload_size_be);
+      if (out_header.payload_size > input_maximum_payload_size) {
+          return InputProtocolError::OversizedPayload;
+      }
+
+      uint32_t status_be;
+      std::memcpy(&status_be, src + 28, 4);
+      out_header.status_or_flags = ntohl(status_be);
+
+      return InputProtocolError::None;
+  }
 
 std::vector<std::byte> encode_hello_message(uint64_t seq, uint64_t ts, const HelloPayload& payload) {
     std::vector<std::byte> p;
@@ -128,19 +180,25 @@ std::vector<std::byte> encode_hello_message(uint64_t seq, uint64_t ts, const Hel
 }
 
 std::optional<HelloPayload> decode_hello_message(std::span<const std::byte> payload, InputProtocolError& out_error) {
-    auto span = payload;
-    HelloPayload out;
-    if (!read_val(span, out.client_version) ||
-        !read_val(span, out.display_width) ||
-        !read_val(span, out.display_height)) {
-        out_error = InputProtocolError::TruncatedPayload;
-        return std::nullopt;
-    }
+      auto span = payload;
+      HelloPayload out;
+      if (!read_val(span, out.client_version) ||
+          !read_val(span, out.display_width) ||
+          !read_val(span, out.display_height)) {
+          out_error = InputProtocolError::TruncatedPayload;
+          return std::nullopt;
+      }
 
-    if (out.client_version != input_protocol_version) {
-        out_error = InputProtocolError::UnsupportedVersion;
-        return std::nullopt;
-    }
+      // DEBUG
+      std::cerr << "[DEBUG decode_hello] client_version=" << out.client_version 
+                << " input_protocol_version=" << input_protocol_version
+                << " display_width=" << out.display_width
+                << " display_height=" << out.display_height << std::endl;
+
+      if (out.client_version != input_protocol_version) {
+          out_error = InputProtocolError::UnsupportedVersion;
+          return std::nullopt;
+      }
 
     if (out.display_width == 0 || out.display_width > 8192 ||
         out.display_height == 0 || out.display_height > 8192) {
